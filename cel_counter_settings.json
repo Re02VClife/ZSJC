@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 {
   "config": {
     "USE_CUSTOM_COLORS": true,
@@ -16,10 +15,10 @@
     "WAVE_MAX_Y": 24,
     "CROP_RATIO": 1.0,
     "CROP_REGION": [
-      483,
-      298,
-      1596,
-      936
+      11,
+      206,
+      1439,
+      928
     ],
     "ALPHA": 1,
     "DIFF_THRESHOLD": 22,
@@ -33,118 +32,8 @@
     "FLOW_MEDIAN_SHIFT_MIN": 0.01,
     "FLOW_LAYER_STATIC_THRESH": 2.0,
     "FLOW_LAYER_CONSISTENCY": 0.75,
-    "SUBTITLE_BOTTOM_RATIO": 0.12,
     "FLOW_QUALITY_LEVEL": 0.03,
     "FLOW_MIN_DISTANCE": 12,
-    "SUBTITLE_CONTRAST_FILTER": true,
-    "SUBTITLE_GRADIENT_THRESH": 50,
-    "SUBTITLE_DENSITY_THRESH": 1,
-    "FRAME_BUFFER_SIZE": 24,
-    "HASH_THRESHOLD": 1,
-    "TOTAL_WAVE_REFRESH_SEC": 2,
-    "FILTER_TRIGGER_WINDOW_MS": 200,
-    "FILTER_TRIGGER_COUNT": 3,
-    "FULL_FILTER_HOLD_SEC": 5,
-    "BASIC_CORR_THRESHOLD": 0.995,
-    "BASIC_MIN_RAW_RATIO_STILL": 0.003,
-    "BASIC_SIGNIFICANT_RATIO": 0.01,
-    "FULL_CORR_THRESHOLD": 0.985,
-    "FULL_STILL_RATIO": 0.01,
-    "LOCAL_AREA_THRESH": 0.003,
-    "LOCAL_BBOX_RATIO_MAX": 0.8,
-    "LOCAL_ASPECT_RATIO_MAX": 8,
-    "LAYER_MIN_VALID_POINTS": 15,
-    "LAYER_MIN_MOVING_POINTS": 10,
-    "LAYER_DIRECTION_CONSISTENCY": 0.75,
-    "LAYER_MEAN_VEC_MIN": 0.1,
-    "LAYER_COS_SIM_THRESH": 0.7,
-    "PREVIEW_DENSE_ALPHA": 0.6,
-    "PREVIEW_DIFF_DECAY": 0.7,
-    "PREVIEW_MOTION_DECAY": 0.85,
-    "PREVIEW_MOTION_MAX_SPEED": 50,
-    "COLORS": {
-      "accent": "#FFA500",
-      "bg": "#000000",
-      "secondary": "#7bb9c1",
-      "btn_bg": "#222222",
-      "title_bg": "#313131",
-      "canvas_bg": "#000000",
-      "wave_line_filtered": "#fd4662",
-      "wave_line_raw": "#36abbc",
-      "filter_translation": "#63cb6d",
-      "filter_optical_flow": "#edf57e",
-      "filter_hash": "#CC44CC",
-      "filter_still": "#421ae6",
-      "filter_local": "#a95036",
-      "filter_other": "#888888",
-      "filter_raw_total": "#13ece1",
-      "filter_filtered_total": "#fd3c58"
-    }
-  },
-  "use_optical_flow": true,
-  "use_hash_filter": false,
-  "layouts": {
-    "1": {
-      "window_geometry": "514x948+1170+83",
-      "panels": {
-        "params": [
-          -2,
-          601,
-          519,
-          317
-        ],
-        "wave": [
-          -1,
-          3,
-          515,
-          253
-        ],
-        "preview": [
-          -3,
-          251,
-          519,
-          353
-        ]
-      }
-    }
-  },
-  "active_layout": "1"
-=======
-{
-  "config": {
-    "USE_CUSTOM_COLORS": true,
-    "SHOW_INFO_PANEL": true,
-    "SHOW_WAVE1": true,
-    "SHOW_WAVE2": true,
-    "REFRESH_INTERVAL": 0.4,
-    "SCALE_FACTOR": 0.5,
-    "SSIM_THRESHOLD": 0.9,
-    "WAVE_HISTORY_SEC": 60,
-    "WAVE_REFRESH_MS": 200,
-    "WAVE2_HISTORY_SEC": 1500,
-    "WAVE2_REFRESH_MS": 3000,
-    "JingzhiShiJian": 60,
-    "WAVE_MAX_Y": 24,
-    "CROP_RATIO": 0.7,
-    "CROP_REGION": null,
-    "ALPHA": 1,
-    "DIFF_THRESHOLD": 22,
-    "MIN_DIFF_THRESHOLD": 5,
-    "MAX_DIFF_THRESHOLD": 30,
-    "MIN_CHANGE_RATIO": 0.002,
-    "SIGNIFICANT_CHANGE_RATIO": 0.01,
-    "ALIGNED_CHANGE_THRESHOLD": 0.012,
-    "FLOW_FEATURE_COUNT": 200,
-    "FLOW_STATIC_THRESH": 1,
-    "FLOW_MEDIAN_SHIFT_MIN": 0.01,
-    "FLOW_LAYER_STATIC_THRESH": 2.0,
-    "FLOW_LAYER_CONSISTENCY": 0.75,
-    "SUBTITLE_BOTTOM_RATIO": 0.12,
-    "FLOW_QUALITY_LEVEL": 0.03,
-    "FLOW_MIN_DISTANCE": 12,
-    "SUBTITLE_CONTRAST_FILTER": true,
-    "SUBTITLE_GRADIENT_THRESH": 50,
-    "SUBTITLE_DENSITY_THRESH": 1,
     "FRAME_BUFFER_SIZE": 24,
     "HASH_THRESHOLD": 1,
     "TOTAL_WAVE_REFRESH_SEC": 2,
@@ -175,91 +64,48 @@
       "btn_bg": "#222222",
       "title_bg": "#111111",
       "canvas_bg": "#000000",
-      "wave_line_filtered": "#FFA500",
+      "wave_line_filtered": "#ff0000",
       "wave_line_raw": "#778899",
-      "filter_translation": "#6dec57",
-      "filter_optical_flow": "#f4f099",
+      "filter_translation": "#80ff80",
+      "filter_optical_flow": "#ffff80",
       "filter_hash": "#CC44CC",
-      "filter_still": "#0106c5",
-      "filter_local": "#00cccc",
+      "filter_still": "#0000ff",
+      "filter_local": "#00FFFF",
       "filter_other": "#888888",
-      "filter_raw_total": "#dfcfce",
-      "filter_filtered_total": "#ff1e2f"
-    }
+      "filter_raw_total": "#FFA500",
+      "filter_filtered_total": "#ff0000"
+    },
+    "SUBTITLE_BOTTOM_RATIO": 0.12,
+    "SUBTITLE_CONTRAST_FILTER": true,
+    "SUBTITLE_GRADIENT_THRESH": 50,
+    "SUBTITLE_DENSITY_THRESH": 1
   },
   "use_optical_flow": true,
-  "use_hash_filter": false,
+  "use_hash_filter": true,
   "layouts": {
-    "11": {
-      "window_geometry": "1091x682+508+245",
+    "1": {
+      "window_geometry": "564x1001+1345+36",
       "panels": {
         "params": [
-          616,
-          4,
-          492,
-          652
+          1,
+          664,
+          559,
+          316
         ],
         "wave": [
-          -3,
-          384,
-          617,
-          277
+          5,
+          5,
+          557,
+          228
         ],
         "preview": [
-          -1,
-          2,
-          617,
-          388
-        ]
-      }
-    },
-    "\u9ed8\u8ba4\u5e03\u5c40": {
-      "window_geometry": "1091x682+459+318",
-      "panels": {
-        "params": [
-          616,
           4,
-          492,
-          652
-        ],
-        "wave": [
-          -3,
-          384,
-          617,
-          277
-        ],
-        "preview": [
-          -1,
-          -4,
-          617,
-          388
-        ]
-      }
-    },
-    "\u7ad6": {
-      "window_geometry": "634x1053+1286+2",
-      "panels": {
-        "params": [
-          3,
-          676,
-          643,
-          352
-        ],
-        "wave": [
-          3,
-          4,
-          632,
-          277
-        ],
-        "preview": [
-          3,
-          280,
-          638,
-          419
+          224,
+          556,
+          442
         ]
       }
     }
   },
-  "active_layout": "\u7ad6"
->>>>>>> 9fc274e7ae6af0036ee6d18f8b684bd055c603aa
+  "active_layout": "1"
 }
