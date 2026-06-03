@@ -70,13 +70,10 @@ def get_bottom_subtitle_mask(curr_gray):
     return mask
 
 def is_raw_change(prev, curr):
-    """原始变化检测，包含字幕屏蔽"""
+    """原始变化检测"""
     diff = cv2.absdiff(prev, curr)
     thresh = adaptive_threshold(curr)
     _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
-    if CONFIG["SUBTITLE_BOTTOM_RATIO"] > 0:
-        sub_mask = get_bottom_subtitle_mask(curr)
-        mask = cv2.bitwise_and(mask, sub_mask)
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     ratio = np.count_nonzero(mask) / mask.size
@@ -85,16 +82,11 @@ def is_raw_change(prev, curr):
 def basic_is_new_cel(prev, curr):
     """基础检测，返回 (是否为新张, 移动类型描述)"""
     corr = cv2.matchTemplate(prev, curr, cv2.TM_CCOEFF_NORMED)[0][0]
-    sub_mask = None
-    if CONFIG["SUBTITLE_BOTTOM_RATIO"] > 0:
-        sub_mask = get_bottom_subtitle_mask(curr)
 
     if corr > CONFIG["BASIC_CORR_THRESHOLD"]:
         raw_diff = cv2.absdiff(prev, curr)
         raw_thresh = adaptive_threshold(curr)
         _, raw_mask = cv2.threshold(raw_diff, raw_thresh, 255, cv2.THRESH_BINARY)
-        if sub_mask is not None:
-            raw_mask = cv2.bitwise_and(raw_mask, sub_mask)
         raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
         if raw_ratio < CONFIG["BASIC_MIN_RAW_RATIO_STILL"]:
             return False, "极慢平移/静止"
@@ -103,12 +95,9 @@ def basic_is_new_cel(prev, curr):
         else:
             return True, "新作画(基础)"
 
-    # 相关度低，完整差分
     diff_thresh = adaptive_threshold(curr)
     raw_diff = cv2.absdiff(prev, curr)
     _, raw_mask = cv2.threshold(raw_diff, diff_thresh, 255, cv2.THRESH_BINARY)
-    if sub_mask is not None:
-        raw_mask = cv2.bitwise_and(raw_mask, sub_mask)
     kernel = np.ones((3, 3), np.uint8)
     raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
     raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
@@ -188,17 +177,11 @@ def is_layer_camera_move_v2(prev, curr_aligned, mask):
 
 def full_is_new_cel(prev, curr, use_optical_flow):
     """完整检测，返回 (是否为新张, 移动类型描述)"""
-    sub_mask = None
-    if CONFIG["SUBTITLE_BOTTOM_RATIO"] > 0:
-        sub_mask = get_bottom_subtitle_mask(curr)
-
     corr = cv2.matchTemplate(prev, curr, cv2.TM_CCOEFF_NORMED)[0][0]
     if corr > CONFIG["FULL_CORR_THRESHOLD"]:
         raw_diff = cv2.absdiff(prev, curr)
         raw_thresh = adaptive_threshold(curr)
         _, raw_mask = cv2.threshold(raw_diff, raw_thresh, 255, cv2.THRESH_BINARY)
-        if sub_mask is not None:
-            raw_mask = cv2.bitwise_and(raw_mask, sub_mask)
         raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
         if raw_ratio < CONFIG["FULL_STILL_RATIO"]:
             return False, "极慢平移/静止"
@@ -206,16 +189,12 @@ def full_is_new_cel(prev, curr, use_optical_flow):
     diff_thresh = adaptive_threshold(curr)
     raw_diff = cv2.absdiff(prev, curr)
     _, raw_mask = cv2.threshold(raw_diff, diff_thresh, 255, cv2.THRESH_BINARY)
-    if sub_mask is not None:
-        raw_mask = cv2.bitwise_and(raw_mask, sub_mask)
     raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
 
-    # 对齐后差分
+    # 对齐后差分（不再使用字幕掩膜）
     curr_aligned, has_shift = align_background(prev, curr)
     diff = cv2.absdiff(prev, curr_aligned)
     _, mask = cv2.threshold(diff, diff_thresh, 255, cv2.THRESH_BINARY)
-    if sub_mask is not None:
-        mask = cv2.bitwise_and(mask, sub_mask)
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     change_ratio = np.count_nonzero(mask) / mask.size
@@ -223,22 +202,17 @@ def full_is_new_cel(prev, curr, use_optical_flow):
     if raw_ratio >= CONFIG["MIN_CHANGE_RATIO"] and change_ratio < CONFIG["ALIGNED_CHANGE_THRESHOLD"] and has_shift:
         return False, "全局平移"
 
-    # 局部运动判断
     if change_ratio >= CONFIG["ALIGNED_CHANGE_THRESHOLD"]:
         if has_local_motion(mask):
             return True, "新作画"
 
-        # 光流图层分离
-        feature_mask = mask.copy()
-        if sub_mask is not None:
-            feature_mask = cv2.bitwise_and(feature_mask, sub_mask)
-        if use_optical_flow and is_layer_camera_move_v2(prev, curr_aligned, feature_mask):
+        # 光流图层分离（不再叠加字幕掩膜）
+        if use_optical_flow and is_layer_camera_move_v2(prev, curr_aligned, mask):
             return False, "图层分离运镜"
 
         if change_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
             return True, "新作画"
 
-    # 剩余情况使用 SSIM 判断
     if change_ratio < CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
         mask_inv = cv2.bitwise_not(mask)
         score = cv2.matchTemplate(prev, curr_aligned, cv2.TM_CCOEFF_NORMED, mask=mask_inv)[0][0]
