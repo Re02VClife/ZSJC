@@ -2355,12 +2355,11 @@ class AnimeCelCounter:
         color_filtered = color_manager.get_color('wave_line_filtered')
         color_raw = color_manager.get_color('wave_line_raw')
         data_list = [
-            (self.wave_raw_data, color_raw),
-            (self.wave_data, color_filtered)
+            (self.wave2_raw_data, color_raw),
+            (self.wave2_data, color_filtered)
         ]
         self._draw_wave_multi(self.canvas2, data_list,
                               CONFIG["WAVE2_HISTORY_SEC"], CONFIG["WAVE_MAX_Y"], "25min")
-
     def _draw_wave_multi(self, canvas, data_list, history_sec, y_max, title=""):
         canvas.delete("all")
         width = canvas.winfo_width()

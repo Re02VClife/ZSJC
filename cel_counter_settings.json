@@ -1,6 +1,6 @@
 {
   "config": {
-    "USE_CUSTOM_COLORS": true,
+    "USE_CUSTOM_COLORS": false,
     "SHOW_INFO_PANEL": true,
     "SHOW_WAVE1": true,
     "SHOW_WAVE2": true,
@@ -15,10 +15,10 @@
     "WAVE_MAX_Y": 24,
     "CROP_RATIO": 1.0,
     "CROP_REGION": [
-      39,
-      199,
-      1390,
-      923
+      34,
+      137,
+      1883,
+      961
     ],
     "ALPHA": 1,
     "MIN_DIFF_THRESHOLD": 5,
