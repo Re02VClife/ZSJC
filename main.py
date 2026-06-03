@@ -13,7 +13,7 @@ from collections import deque
 from config import CONFIG, CONFIG_DEFAULT, color_manager
 from widgets import DraggablePanel
 from detection import (
-    compute_hash, adaptive_threshold, align_background,
+    compute_hash, adaptive_threshold,
     is_raw_change, basic_is_new_cel, full_is_new_cel
 )
 from preview import PreviewManager
@@ -36,7 +36,7 @@ class AnimeCelCounter:
         else:
             base_dir = os.path.dirname(os.path.abspath(__file__))
         self.readme_path = os.path.join(base_dir, "README.txt")
-
+        self._drag_data = {'start_x': 0, 'start_y': 0, 'dragging': False}
         self._settings_win = None
         self.lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -81,7 +81,7 @@ class AnimeCelCounter:
         self.total_still_filtered = 0
         self.total_local_filtered = 0
         self.total_other_unknown_filtered = 0
-
+        self.total_zoom_filtered = 0
         self.load_settings()
 
         self.frame_buffer = deque(maxlen=CONFIG["FRAME_BUFFER_SIZE"])
@@ -217,14 +217,30 @@ class AnimeCelCounter:
 
     def make_draggable(self):
         def start(e):
-            self.drag_x = e.x
-            self.drag_y = e.y
+            # 任何子控件点击都会冒泡到这里，记录起始位置
+            self._drag_data['start_x'] = e.x_root
+            self._drag_data['start_y'] = e.y_root
+            self._drag_data['dragging'] = False
+
         def move(e):
-            dx = e.x - self.drag_x
-            dy = e.y - self.drag_y
-            self.root.geometry(f"+{self.root.winfo_x() + dx}+{self.root.winfo_y() + dy}")
+            if not hasattr(self, '_drag_data'):
+                return
+            dx = e.x_root - self._drag_data['start_x']
+            dy = e.y_root - self._drag_data['start_y']
+            # 移动超过5像素才视为拖动
+            if abs(dx) > 5 or abs(dy) > 5:
+                self._drag_data['dragging'] = True
+                self.root.geometry(f"+{self.root.winfo_x() + dx}+{self.root.winfo_y() + dy}")
+                # 更新起始点，防止窗口跳跃
+                self._drag_data['start_x'] = e.x_root
+                self._drag_data['start_y'] = e.y_root
+
+        def release(e):
+            self._drag_data['dragging'] = False
+
         self.root.bind("<Button-1>", start)
         self.root.bind("<B1-Motion>", move)
+        self.root.bind("<ButtonRelease-1>", release)
 
     def _draw_buttons(self):
         canvas = self.btn_canvas
@@ -252,8 +268,13 @@ class AnimeCelCounter:
                                          text=text, fill=accent,
                                          font=("Arial", 9, "bold"),
                                          activefill="#FFD700")
-            canvas.tag_bind(rect_id, "<Button-1>", lambda e, c=cmd: c())
-            canvas.tag_bind(text_id, "<Button-1>", lambda e, c=cmd: c())
+
+            def safe_cmd(cmd):
+                if not self._drag_data['dragging']:
+                    cmd()
+
+            canvas.tag_bind(rect_id, "<ButtonRelease-1>", lambda e, c=cmd: safe_cmd(c))
+            canvas.tag_bind(text_id, "<ButtonRelease-1>", lambda e, c=cmd: safe_cmd(c))
             canvas.tag_bind(rect_id, "<Enter>",
                             lambda e, r=rect_id: canvas.itemconfig(r, fill="#111111"))
             canvas.tag_bind(rect_id, "<Leave>",
@@ -347,15 +368,12 @@ class AnimeCelCounter:
             "JingzhiShiJian": "静止自动暂停(秒)",
             "WAVE_MAX_Y": "波形Y轴最大值",
             "CROP_RATIO": "截图区域比例",
-            "DIFF_THRESHOLD": "变化检测阈值",
             "MIN_DIFF_THRESHOLD": "最小变化阈值",
             "MAX_DIFF_THRESHOLD": "最大变化阈值",
             "MIN_CHANGE_RATIO": "最小变化占比",
             "ALIGNED_CHANGE_THRESHOLD": "平移对齐残差",
             "SIGNIFICANT_CHANGE_RATIO": "显著变化占比",
             "FLOW_FEATURE_COUNT": "光流特征点数",
-            "FLOW_STATIC_THRESH": "静止点位移阈值",
-            "FLOW_MEDIAN_SHIFT_MIN": "主平移最小阈值",
             "FRAME_BUFFER_SIZE": "哈希缓冲区大小",
             "HASH_THRESHOLD": "哈希距离阈值",
             "TOTAL_WAVE_REFRESH_SEC": "总张数波形刷新(秒)",
@@ -364,7 +382,6 @@ class AnimeCelCounter:
             "FULL_FILTER_HOLD_SEC": "完整过滤保持(秒)",
             "BASIC_CORR_THRESHOLD": "基础检测相似度阈值",
             "BASIC_MIN_RAW_RATIO_STILL": "基础静止变化面积",
-            "BASIC_SIGNIFICANT_RATIO": "基础大面积阈值",
             "FULL_CORR_THRESHOLD": "完整检测相似度阈值",
             "FULL_STILL_RATIO": "完整静止变化面积",
             "LOCAL_AREA_THRESH": "局部面积占比下限",
@@ -375,28 +392,36 @@ class AnimeCelCounter:
             "LAYER_DIRECTION_CONSISTENCY": "光流方向一致性",
             "LAYER_MEAN_VEC_MIN": "光流主方向最小模长",
             "LAYER_COS_SIM_THRESH": "光流夹角阈值",
+            "FLOW_LAYER_STATIC_THRESH": "残余移动阈值",
+            "FLOW_QUALITY_LEVEL": "角点质量阈值",
+            "FLOW_MIN_DISTANCE": "角点最小间距",
             "PREVIEW_DENSE_ALPHA": "预览稠密光流透明度",
             "PREVIEW_DIFF_DECAY": "预览差分衰减",
             "PREVIEW_MOTION_DECAY": "预览运动衰减",
             "PREVIEW_MOTION_MAX_SPEED": "预览最大速度",
+            "ZOOM_DIRECTION_CONSISTENCY": "缩放径向一致性",
+            "ZOOM_RADIAL_CORRELATION": "缩放距离相关度",
         }
-        entries = {}
+
         groups = [
-            ("基本", ["REFRESH_INTERVAL", "SCALE_FACTOR", "SSIM_THRESHOLD", "JingzhiShiJian", "CROP_RATIO","ALPHA"]),
+            ("基本", ["REFRESH_INTERVAL", "SCALE_FACTOR", "SSIM_THRESHOLD", "JingzhiShiJian", "CROP_RATIO", "ALPHA"]),
             ("波形1", ["WAVE_HISTORY_SEC", "WAVE_REFRESH_MS"]),
             ("波形2", ["WAVE2_HISTORY_SEC", "WAVE2_REFRESH_MS", "WAVE_MAX_Y"]),
-            ("变化检测", ["DIFF_THRESHOLD", "MIN_DIFF_THRESHOLD", "MAX_DIFF_THRESHOLD", "MIN_CHANGE_RATIO",
+            ("变化检测", ["MIN_DIFF_THRESHOLD", "MAX_DIFF_THRESHOLD", "MIN_CHANGE_RATIO",
                           "ALIGNED_CHANGE_THRESHOLD", "SIGNIFICANT_CHANGE_RATIO"]),
-            ("光流法", ["FLOW_FEATURE_COUNT", "FLOW_STATIC_THRESH", "FLOW_MEDIAN_SHIFT_MIN"]),
+            ("光流法", ["FLOW_FEATURE_COUNT", "FLOW_QUALITY_LEVEL", "FLOW_MIN_DISTANCE",
+                        "FLOW_LAYER_STATIC_THRESH"]),
             ("重复帧过滤", ["FRAME_BUFFER_SIZE", "HASH_THRESHOLD"]),
             ("总张数波形", ["TOTAL_WAVE_REFRESH_SEC"]),
             ("动态过滤触发", ["FILTER_TRIGGER_WINDOW_MS", "FILTER_TRIGGER_COUNT", "FULL_FILTER_HOLD_SEC"]),
-            ("基础检测常量", ["BASIC_CORR_THRESHOLD", "BASIC_MIN_RAW_RATIO_STILL", "BASIC_SIGNIFICANT_RATIO"]),
+            ("基础检测常量", ["BASIC_CORR_THRESHOLD", "BASIC_MIN_RAW_RATIO_STILL"]),
             ("完整检测常量", ["FULL_CORR_THRESHOLD", "FULL_STILL_RATIO"]),
             ("局部运动判断", ["LOCAL_AREA_THRESH", "LOCAL_BBOX_RATIO_MAX", "LOCAL_ASPECT_RATIO_MAX"]),
             ("光流图层分离", ["LAYER_MIN_VALID_POINTS", "LAYER_MIN_MOVING_POINTS",
                               "LAYER_DIRECTION_CONSISTENCY", "LAYER_MEAN_VEC_MIN", "LAYER_COS_SIM_THRESH"]),
-            ("预览参数", ["PREVIEW_DENSE_ALPHA", "PREVIEW_DIFF_DECAY", "PREVIEW_MOTION_DECAY", "PREVIEW_MOTION_MAX_SPEED"]),
+            ("缩放运镜", ["ZOOM_DIRECTION_CONSISTENCY", "ZOOM_RADIAL_CORRELATION"]),
+            ("预览参数",
+             ["PREVIEW_DENSE_ALPHA", "PREVIEW_DIFF_DECAY", "PREVIEW_MOTION_DECAY", "PREVIEW_MOTION_MAX_SPEED"]),
         ]
 
         self.crop_ratio_label_var = tk.StringVar()
@@ -408,7 +433,7 @@ class AnimeCelCounter:
         entries = {}
         left_frame = tk.Frame(scroll_frame, bg=bg)
         right_frame = tk.Frame(scroll_frame, bg=bg)
-        left_frame.grid(row=0, column=0, sticky="nw", padx=(0, 10))
+        left_frame.grid(row=0, column=0, sticky="nw", padx=(0, 5))
         right_frame.grid(row=0, column=1, sticky="nw")
 
         for idx, (group_name, keys) in enumerate(groups):
@@ -424,28 +449,32 @@ class AnimeCelCounter:
                 else:
                     label_text = param_names.get(key, key) + ":"
                     tk.Label(target, text=label_text, fg=accent, bg=bg,
-                             font=("Arial", 9)).grid(row=row, column=0, sticky="w", padx=5)
+                             font=("Arial", 9)).grid(row=row, column=0, sticky="w", padx=(0, 2))
                 var = tk.StringVar(value=str(CONFIG[key]))
-                ent = tk.Entry(target, textvariable=var, width=10,
+                ent = tk.Entry(target, textvariable=var, width=5,     #数值格子长度
                                font=("Arial", 9), bg=btn_bg, fg=accent,
                                insertbackground=accent)
-                ent.grid(row=row, column=1, sticky="w")
+                ent.grid(row=row, column=1, sticky="w", padx=(2, 0))              #创建输入框的行
                 entries[key] = var
                 row += 1
 
+        # 功能开关
         row_left = left_frame.grid_size()[1]
         tk.Label(left_frame, text="功能开关", font=("Arial", 10, "bold"),
                  fg=accent, bg=bg).grid(row=row_left, column=0, columnspan=2, sticky="w", pady=(10, 2))
         row_left += 1
         flow_var = tk.BooleanVar(value=self.use_optical_flow)
         tk.Checkbutton(left_frame, text="启用光流法图层分离", variable=flow_var,
-                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w", padx=5)
+                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w",
+                                                                  padx=5)
         row_left += 1
         hash_var = tk.BooleanVar(value=self.use_hash_filter)
         tk.Checkbutton(left_frame, text="启用重复帧过滤", variable=hash_var,
-                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w", padx=5)
+                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w",
+                                                                  padx=5)
         row_left += 1
 
+        # 全局调色板
         tk.Label(left_frame, text="全局调色板", font=("Arial", 10, "bold"),
                  fg=accent, bg=bg).grid(row=row_left, column=0, columnspan=2, sticky="w", pady=(10, 2))
         row_left += 1
@@ -453,19 +482,26 @@ class AnimeCelCounter:
 
         def toggle_custom_colors():
             CONFIG["USE_CUSTOM_COLORS"] = self.custom_color_var.get()
-            for child in color_frame.winfo_children():
-                if isinstance(child, tk.Entry) or isinstance(child, tk.Button):
-                    child.configure(state="normal" if CONFIG["USE_CUSTOM_COLORS"] else "disabled")
+            if CONFIG["USE_CUSTOM_COLORS"]:
+                color_frame.grid()  # 重新显示
+                for child in color_frame.winfo_children():
+                    if isinstance(child, tk.Entry) or isinstance(child, tk.Button):
+                        child.configure(state="normal")
+            else:
+                color_frame.grid_remove()  # 隐藏
             color_manager.apply_theme()
             self._redraw_all()
 
         tk.Checkbutton(left_frame, text="启用自定义调色板", variable=self.custom_color_var,
                        command=toggle_custom_colors,
-                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w", padx=5)
+                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w",
+                                                                  padx=5)
         row_left += 1
 
         color_frame = tk.Frame(left_frame, bg=bg)
         color_frame.grid(row=row_left, column=0, columnspan=2, sticky="we", padx=5)
+        if not CONFIG["USE_CUSTOM_COLORS"]:
+            color_frame.grid_remove() # 不启用时默认隐藏
         row_left += 1
 
         color_keys = [
@@ -474,19 +510,22 @@ class AnimeCelCounter:
             ("wave_line_filtered", "波形1过滤后"), ("wave_line_raw", "波形1过滤前"),
             ("filter_translation", "平移过滤"), ("filter_optical_flow", "光流过滤"),
             ("filter_hash", "哈希过滤"), ("filter_still", "静止过滤"),
-            ("filter_local", "局部过滤"), ("filter_other", "其他过滤"),
+            ("filter_local", "局部过滤"), ("filter_zoom", "缩放过滤"),
+            ("filter_other", "其他过滤"),
             ("filter_raw_total", "过滤前总张数"), ("filter_filtered_total", "过滤后总张数")
         ]
         self.color_vars = {}
         row_color = 0
         for key, name in color_keys:
-            tk.Label(color_frame, text=name+":", fg=accent, bg=bg).grid(row=row_color, column=0, sticky="w")
+            tk.Label(color_frame, text=name + ":", fg=accent, bg=bg).grid(row=row_color, column=0, sticky="w")
             var = tk.StringVar(value=CONFIG["COLORS"].get(key, "#FFFFFF"))
             ent = tk.Entry(color_frame, textvariable=var, width=8, bg=btn_bg, fg=accent,
                            state="normal" if CONFIG["USE_CUSTOM_COLORS"] else "disabled")
             ent.grid(row=row_color, column=1, sticky="w")
+
             def make_color_callback(k, v):
                 return lambda: self._pick_color(k, v)
+
             btn = tk.Button(color_frame, text="  ", bg=var.get(), command=make_color_callback(key, var),
                             state="normal" if CONFIG["USE_CUSTOM_COLORS"] else "disabled")
             btn.grid(row=row_color, column=2, padx=2)
@@ -507,6 +546,7 @@ class AnimeCelCounter:
         btn_frame = tk.Frame(left_frame, bg=bg)
         btn_frame.grid(row=row_left, column=0, columnspan=2, pady=10)
 
+        # 布局管理（右侧）
         row_right = right_frame.grid_size()[1]
         tk.Label(right_frame, text="布局管理", font=("Arial", 10, "bold"),
                  fg=accent, bg=bg).grid(row=row_right, column=0, columnspan=2, sticky="w", pady=(10, 2))
@@ -520,6 +560,7 @@ class AnimeCelCounter:
             for name in self.layouts.keys():
                 display = f"* {name}" if name == self.active_layout else name
                 layout_listbox.insert(tk.END, display)
+
         update_layout_list()
 
         btn_frame_layout = tk.Frame(right_frame, bg=bg)
@@ -579,6 +620,7 @@ class AnimeCelCounter:
         tk.Button(btn_frame_layout, text="设为当前", command=set_active_layout,
                   bg=btn_bg, fg=accent).pack(side="left", padx=2)
 
+        # 保存/恢复按钮
         def save_settings():
             for key, var in entries.items():
                 try:
@@ -657,10 +699,10 @@ class AnimeCelCounter:
 
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
         canvas.bind_all("<MouseWheel>", on_mousewheel)
 
         return entries
-
     def _pick_color(self, key, var):
         from tkinter import colorchooser
         color = colorchooser.askcolor(color=var.get(), title=f"选择{key}颜色")
@@ -789,6 +831,8 @@ class AnimeCelCounter:
                             self.total_translation_filtered += 1
                         elif move_type == "图层分离运镜":
                             self.total_optical_flow_filtered += 1
+                        elif move_type == "缩放运镜":
+                            self.total_zoom_filtered += 1
                         elif move_type == "极慢平移/静止":
                             self.total_still_filtered += 1
                         elif move_type == "局部变化(过滤)":
@@ -862,9 +906,10 @@ class AnimeCelCounter:
                     still_f = self.total_still_filtered
                     local_f = self.total_local_filtered
                     other_f = self.total_other_unknown_filtered
+                    zoom_f = self.total_zoom_filtered
                 self.total_history.append((self.elapsed_time, total_r, total_f,
                                            trans_f, flow_f, hash_f,
-                                           still_f, local_f, other_f))
+                                           still_f, local_f, other_f, zoom_f))
                 self._last_recorded_time = self.elapsed_time
 
             with self.lock:
@@ -966,7 +1011,7 @@ class AnimeCelCounter:
         self.total_still_filtered = 0
         self.total_local_filtered = 0
         self.total_other_unknown_filtered = 0
-
+        self.total_zoom_filtered = 0
         accent = color_manager.get_color('accent')
         self.lb_rt.config(text="实时张数：0.0 ")
         self.lb_total_time.config(text="运行时长：0.0 s")
@@ -1003,6 +1048,7 @@ class AnimeCelCounter:
             return base + "平移运镜"
         elif mt == "图层分离运镜":
             return base + "多层平移"
+
         elif mt == "局部变化(过滤)":
             return base + "局部变化"
         elif mt == "静止":
@@ -1030,8 +1076,6 @@ class AnimeCelCounter:
             elif v < 13.0:
                 return base + "一拍二"
             elif v < 20.0:
-                return base + "一拍一"
-            else:
                 return base + "高频作画"
 
     def update_wave(self):
@@ -1060,8 +1104,9 @@ class AnimeCelCounter:
         color_filtered = color_manager.get_color('wave_line_filtered')
         color_raw = color_manager.get_color('wave_line_raw')
         data_list = [
-            (self.wave_data, color_filtered),
-            (self.wave_raw_data, color_raw)
+            (self.wave_raw_data, color_raw),
+            (self.wave_data, color_filtered)
+
         ]
         self._draw_wave_multi(self.canvas, data_list,
                               CONFIG["WAVE_HISTORY_SEC"], CONFIG["WAVE_MAX_Y"], "60s")
@@ -1070,8 +1115,8 @@ class AnimeCelCounter:
         color_filtered = color_manager.get_color('wave_line_filtered')
         color_raw = color_manager.get_color('wave_line_raw')
         data_list = [
-            (self.wave2_data, color_filtered),
-            (self.wave2_raw_data, color_raw)
+            (self.wave_raw_data, color_raw),
+            (self.wave_data, color_filtered)
         ]
         self._draw_wave_multi(self.canvas2, data_list,
                               CONFIG["WAVE2_HISTORY_SEC"], CONFIG["WAVE_MAX_Y"], "25min")
@@ -1148,6 +1193,7 @@ class AnimeCelCounter:
         still = [p[6] for p in history]
         local = [p[7] for p in history]
         other_unknown = [p[8] for p in history]
+        zoom = [p[9] for p in history]
 
         min_t = times[0]
         max_t = times[-1]
@@ -1204,6 +1250,7 @@ class AnimeCelCounter:
             (still, color_manager.get_color('filter_still'), '静止过滤'),
             (local, color_manager.get_color('filter_local'), '局部变化过滤'),
             (other_unknown, color_manager.get_color('filter_other'), '其他'),
+            (zoom, color_manager.get_color('filter_zoom'), '缩放过滤'),
         ]
 
         final_values = {}
@@ -1236,7 +1283,8 @@ class AnimeCelCounter:
                 '哈希': last[5] - first[5],
                 '静止': last[6] - first[6],
                 '局部': last[7] - first[7],
-                '其他': last[8] - first[8]
+                '其他': last[8] - first[8],
+                '缩放': last[9] - first[9]
             }
             total_inc = sum(inc.values())
             if total_inc > 0:
@@ -1246,7 +1294,8 @@ class AnimeCelCounter:
                     '哈希': color_manager.get_color('filter_hash'),
                     '静止': color_manager.get_color('filter_still'),
                     '局部': color_manager.get_color('filter_local'),
-                    '其他': color_manager.get_color('filter_other')
+                    '其他': color_manager.get_color('filter_other'),
+                    '缩放': color_manager.get_color('filter_zoom')
                 }
                 bar_w = 80
                 bar_h = 40
@@ -1255,7 +1304,7 @@ class AnimeCelCounter:
                 canvas.create_rectangle(bar_x - 1, bar_y - 1, bar_x + bar_w + 1, bar_y + bar_h + 1,
                                         outline=accent)
                 cum_y = bar_y + bar_h
-                for key in ['平移', '光流', '哈希', '静止', '局部', '其他']:
+                for key in ['平移', '光流', '哈希', '静止', '局部', '其他', '缩放']:
                     val = inc[key]
                     if val <= 0:
                         continue

@@ -93,7 +93,8 @@ def create_settings_window(parent, counter):
             counter.settings_canvas.unbind_all("<MouseWheel>")
         counter._settings_win = None
         counter.settings_wave_canvas = None
-        counter._stop_preview()
+        # 修复这一行
+        counter.preview_manager.stop()  # 原来为 counter._stop_preview()
         if hasattr(counter, '_crop_window') and counter._crop_window:
             counter._crop_window.destroy()
         win.destroy()

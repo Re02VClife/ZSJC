@@ -8,16 +8,16 @@ import tkinter as tk
 # --- Begin merged modules ---
 
 # ====== Module: config.py ======
+# config.py
 import copy
 import os
 import sys
-import tkinter as tk  # ColorManager 中用到，需要导入
+import tkinter as tk
 
 # ==================== 颜色管理器 ====================
 class ColorManager:
     """统一管理全局调色板，支持主题切换与实时更新控件"""
     def __init__(self, config_colors):
-
         self._config = config_colors
         self._widget_color_map = {}
         self._widgets_to_update = []
@@ -43,7 +43,6 @@ class ColorManager:
                     widget.configure(bg=bg)
                 elif isinstance(widget, (tk.Label, tk.Checkbutton)):
                     widget.configure(fg=fg, bg=bg)
-                # 可根据需要扩展其他控件类型，如 Button 等
                 elif isinstance(widget, tk.Button):
                     widget.configure(fg=fg, bg=self._config.get('btn_bg', '#222222'))
             except Exception:
@@ -56,97 +55,111 @@ class ColorManager:
 color_manager = None
 
 
-
-# ==================== 配置参数====================
+# ==================== 配置参数 ====================
 CONFIG = {
-
     "USE_CUSTOM_COLORS": True,
-    # ========== 新增 ==========
-    "SHOW_INFO_PANEL": True,  # 显示实时数据面板
-    "SHOW_WAVE1": True,  # 显示波形1
-    "SHOW_WAVE2": True,  # 显示波形2
-    "REFRESH_INTERVAL": 0.4,           # UI 标签刷新间隔（秒）
-    "SCALE_FACTOR": 0.5,               # 截图缩放比例
-    "SSIM_THRESHOLD": 0.90,            # 背景相似度阈值（用于局部变化过滤）
-    "WAVE_HISTORY_SEC": 60,            # 波形1历史时长（秒）
-    "WAVE_REFRESH_MS": 200,            # 波形1刷新间隔（毫秒）
-    "WAVE2_HISTORY_SEC": 1500,         # 波形2历史时长（秒）
-    "WAVE2_REFRESH_MS": 3000,          # 波形2刷新间隔（毫秒）
-    "JingzhiShiJian": 60,              # 静止自动暂停（秒）
-    "WAVE_MAX_Y": 24,                  # 波形Y轴最大值（张/秒）
-    "CROP_RATIO": 0.7,                 # 截取屏幕中心区域比例
-    "CROP_REGION": None,               # 手动截图区域（left, top, right, bottom），None则自动计算
-    "ALPHA": 1,                        # 窗口透明度（0.0~1.0）
-    "DIFF_THRESHOLD": 22,              # 静态二值化阈值（备选），实际使用自适应阈值
-    "MIN_DIFF_THRESHOLD": 5,           # 极暗场景下的最低阈值
-    "MAX_DIFF_THRESHOLD": 30,          # 亮场景下的最高阈值
-    "MIN_CHANGE_RATIO": 0.002,         # 最小变化像素占比（原始检测/基础检测均用）
-    "SIGNIFICANT_CHANGE_RATIO": 0.01,  # 变化面积大于此值视为新作画（大面积直接通过）
-    "ALIGNED_CHANGE_THRESHOLD": 0.012, # 全局平移对齐后剩余变化面积上限（低于此值视为纯平移运镜）
-    # 光流法
-    "FLOW_FEATURE_COUNT": 200,         # 光流法提取特征点最大数量
-    "FLOW_STATIC_THRESH": 1,         # 位移小于此像素视为静止点（对应原图2像素）
-    "FLOW_MEDIAN_SHIFT_MIN": 0.01,     # 主平移量至少大于此值才考虑图层分离
-    "FLOW_LAYER_STATIC_THRESH": 2.0,   # 对齐后剩余移动的静止判断阈值（像素）
-    "FLOW_LAYER_CONSISTENCY": 0.75,    # 方向一致性阈值（大于此值视为运镜）
 
-    "FLOW_QUALITY_LEVEL": 0.03,        # 角点检测质量阈值，降低以增加点数
-    "FLOW_MIN_DISTANCE": 12,           # 角点最小间距，减小以允许更密集
+    # ========== 基本显示与控制 ==========
+    "SHOW_INFO_PANEL": True,            # 显示实时数据面板
+    "SHOW_WAVE1": True,                 # 显示波形1
+    "SHOW_WAVE2": True,                 # 显示波形2
+    "REFRESH_INTERVAL": 0.4,            # UI 标签刷新间隔（秒）
+    "SCALE_FACTOR": 0.5,                # 截图缩放比例
+    "SSIM_THRESHOLD": 0.90,             # 背景相似度阈值（用于局部变化过滤）
+    "WAVE_HISTORY_SEC": 60,             # 波形1历史时长（秒）
+    "WAVE_REFRESH_MS": 200,             # 波形1刷新间隔（毫秒）
+    "WAVE2_HISTORY_SEC": 1500,          # 波形2历史时长（秒）
+    "WAVE2_REFRESH_MS": 3000,           # 波形2刷新间隔（毫秒）
+    "JingzhiShiJian": 60,               # 静止自动暂停（秒）
+    "WAVE_MAX_Y": 24,                   # 波形Y轴最大值（张/秒）
+    "CROP_RATIO": 0.7,                  # 截取屏幕中心区域比例
+    "CROP_REGION": None,                # 手动截图区域（left, top, right, bottom），None则自动计算
+    "ALPHA": 1,                         # 窗口透明度（0.0~1.0）
 
 
-    "FRAME_BUFFER_SIZE": 24,           # 哈希缓冲区大小（帧数）
-    "HASH_THRESHOLD": 1,               # 汉明距离阈值，≤此值视为相同帧
-    "TOTAL_WAVE_REFRESH_SEC": 2,       # 设置界面总张数波形刷新间隔（秒）
-    "FILTER_TRIGGER_WINDOW_MS": 200,   # 动态过滤触发窗口（毫秒）
-    "FILTER_TRIGGER_COUNT": 3,         # 窗口内基础检测新张数达到此值触发完整过滤
-    "FULL_FILTER_HOLD_SEC": 5,         # 触发后保持完整过滤的秒数
+    # ========== 图像处理阈值 ==========
+    "MIN_DIFF_THRESHOLD": 5,            # 极暗场景下的最低差分阈值
+    "MAX_DIFF_THRESHOLD": 30,           # 亮场景下的最高差分阈值
+    "MIN_CHANGE_RATIO": 0.003,          # 最小变化像素占比（原始检测/基础检测共用）
 
-    "BASIC_CORR_THRESHOLD": 0.995,     # 基础检测快速相似度阈值（高于此值且变化极小则判静止）
-    "BASIC_MIN_RAW_RATIO_STILL": 0.003,# 基础检测极慢平移/静止的最小变化面积
-    "BASIC_SIGNIFICANT_RATIO": 0.01,   # 基础检测大面积直接通过阈值
+    # ========== 哈希与重复帧过滤 ==========
+    "FRAME_BUFFER_SIZE": 24,            # 哈希缓冲区大小（帧数）
+    "HASH_THRESHOLD": 0,                # 汉明距离阈值，≤此值视为相同帧
 
-    "FULL_CORR_THRESHOLD": 0.985,      # 完整检测快速相似度阈值
-    "FULL_STILL_RATIO": 0.01,          # 完整检测静止变化面积阈值
+    # ========== 波形相关 ==========
+    "TOTAL_WAVE_REFRESH_SEC": 2,        # 设置界面总张数波形刷新间隔（秒）
 
-    "LOCAL_AREA_THRESH": 0.003,        # 局部运动判断：最大连通域面积占比下限
-    "LOCAL_BBOX_RATIO_MAX": 0.8,       # 局部运动判断：变化点包围盒面积占比上限
-    "LOCAL_ASPECT_RATIO_MAX": 8,       # 局部运动判断：最大连通域宽高比上限
+    # ========== 检测核心参数 ==========
+    "SIGNIFICANT_CHANGE_RATIO": 0.02,   # 变化面积大于此值视为新作画（大面积直接通过）
+    "ALIGNED_CHANGE_THRESHOLD": 0.02,   # 全局平移对齐后剩余变化面积上限（低于此值视为纯平移运镜）
+    "BASIC_CORR_THRESHOLD": 0.996,      # 基础检测快速相似度阈值（高于此值且变化极小则判静止）
+    "BASIC_MIN_RAW_RATIO_STILL": 0.001, # 基础检测极慢平移/静止的最小变化面积
+    "FILTER_TRIGGER_WINDOW_MS": 200,    # 动态过滤触发窗口（毫秒）
+    "FILTER_TRIGGER_COUNT": 3,          # 窗口内基础检测新张数达到此值触发完整过滤
+    "FULL_FILTER_HOLD_SEC": 5,          # 触发后保持完整过滤的秒数
 
-    "LAYER_MIN_VALID_POINTS": 15,       # 光流图层分离：最小有效特征点数
-    "LAYER_MIN_MOVING_POINTS": 10,      # 光流图层分离：最小移动点数
-    "LAYER_DIRECTION_CONSISTENCY": 0.75,# 光流图层分离：方向一致性阈值（与FLOW_LAYER_CONSISTENCY一致）
-    "LAYER_MEAN_VEC_MIN": 0.1,         # 光流图层分离：主方向向量最小模长
-    "LAYER_COS_SIM_THRESH": 0.7,       # 光流图层分离：与主方向夹角余弦阈值
+    "FULL_CORR_THRESHOLD": 0.985,       # 完整检测快速相似度阈值
+    "FULL_STILL_RATIO": 0.03,           # 完整检测静止变化面积阈值
 
-    "PREVIEW_DENSE_ALPHA": 0.6,        # 预览稠密光流叠加透明度
-    "PREVIEW_DIFF_DECAY": 0.7,         # 预览差分残影衰减系数 越小残留越短
-    "PREVIEW_MOTION_DECAY": 0.85,      # 预览运动拖影衰减系数
-    "PREVIEW_MOTION_MAX_SPEED": 50,    # 预览运动速度映射最大值（像素）
+    # ========== 局部运动判断 ==========
+    "LOCAL_AREA_THRESH": 0.003,         # 局部运动判断：最大连通域面积占比下限
+    "LOCAL_BBOX_RATIO_MAX": 0.8,        # 局部运动判断：变化点包围盒面积占比上限
+    "LOCAL_ASPECT_RATIO_MAX": 8,        # 局部运动判断：最大连通域宽高比上限
+
+    # ========== 光流图层分离检测 ==========
+    "LAYER_MIN_VALID_POINTS": 15,       # 最小有效特征点数（全局平移估计与图层分离共用）
+    "LAYER_MIN_MOVING_POINTS": 10,      # 图层分离：最小移动点数
+    "LAYER_DIRECTION_CONSISTENCY": 0.75,# 图层分离：方向一致性阈值
+    "LAYER_MEAN_VEC_MIN": 0.1,          # 图层分离：主方向向量最小模长
+    "LAYER_COS_SIM_THRESH": 0.7,        # 图层分离：与主方向夹角余弦阈值
+    "FLOW_LAYER_STATIC_THRESH": 2.0,    # 对齐后残余移动的静止判断阈值（像素）
+
+    # ========== 光流通用参数 ==========
+    "FLOW_FEATURE_COUNT": 200,          # 光流法提取特征点最大数量（预览也用）
+    "FLOW_QUALITY_LEVEL": 0.05,         # 角点检测质量阈值
+    "FLOW_MIN_DISTANCE": 10,            # 角点最小间距
+
+    # ========== 预览参数 ==========
+    "PREVIEW_DENSE_ALPHA": 0.6,         # 预览稠密光流叠加透明度
+    "PREVIEW_DIFF_DECAY": 0.7,          # 预览差分残影衰减系数（越小残留越短）
+    "PREVIEW_MOTION_DECAY": 0.85,       # 预览运动拖影衰减系数
+    "PREVIEW_MOTION_MAX_SPEED": 50,     # 预览运动速度映射最大值（像素）
+
+    # ========== 缩放运镜检测 ==========
+    "ZOOM_DIRECTION_CONSISTENCY": 0.7,  # 缩放运镜径向一致性阈值
+    "ZOOM_RADIAL_CORRELATION": 0.3,     # 缩放运镜位移-距离相关系数下限
+
+    # ========== 颜色方案 ==========
     "COLORS": {
-        "accent": "#FFA500",
+        "accent": "#E6397C",
         "bg": "#000000",
         "secondary": "#778899",
         "btn_bg": "#222222",
         "title_bg": "#111111",
-        "canvas_bg": "#000000",
+        "canvas_bg": "#1A1A1D",
         "wave_line_filtered": "#FFA500",
         "wave_line_raw": "#778899",
-        "filter_translation": "#FF4444",
-        "filter_optical_flow": "#4488FF",
+        "filter_translation": "#88dba3",
+        "filter_optical_flow": "#ffff99",
         "filter_hash": "#CC44CC",
-        "filter_still": "#FF8C00",
+        "filter_still": "#2d35d2",
         "filter_local": "#00FFFF",
         "filter_other": "#888888",
-        "filter_raw_total": "#FFA500",
-        "filter_filtered_total": "#00CC66"
+        "filter_raw_total": "#9dc1c6",
+        "filter_zoom": "#FFA07A",       # 缩放过滤颜色
+        "filter_filtered_total": "#ff4848"
     },
-    "USE_CUSTOM_COLORS": True,
+
+    "USE_CUSTOM_COLORS": True,          # 是否启用自定义调色板
 }
+
+# 深拷贝一份作为默认配置，用于恢复出厂设置
 CONFIG_DEFAULT = copy.deepcopy(CONFIG)
 color_manager = ColorManager(CONFIG["COLORS"])
 
 
 def get_settings_path():
+    """返回配置文件存放路径"""
     if getattr(sys, 'frozen', False):
         return os.path.join(os.path.expanduser("~"), "cel_counter_settings.json")
     return "cel_counter_settings.json"
@@ -292,14 +305,24 @@ class DraggablePanel:
         self.frame.place(x=x, y=y, width=max(self.min_width, w), height=max(self.min_height, h))
 # ====== Module: detection.py ======
 # detection.py
+"""
+动画作画张数检测模块。
+包含感知哈希、自适应阈值、全局平移估计、图层分离、缩放检测、
+局部运动判断、基础/完整检测等功能。
+"""
+
 import cv2
 import numpy as np
 
+# ======================== 基本工具 ========================
+
 def compute_hash(gray_img):
-    """计算感知哈希"""
+    """计算感知哈希（16x16）"""
     resized = cv2.resize(gray_img, (16, 16), interpolation=cv2.INTER_AREA)
     avg = resized.mean()
     return (resized > avg).flatten()
+
+
 
 def adaptive_threshold(frame):
     """根据帧的平均亮度计算自适应差分阈值"""
@@ -307,62 +330,14 @@ def adaptive_threshold(frame):
     t = CONFIG["MIN_DIFF_THRESHOLD"] + (mean_val / 255.0) * (CONFIG["MAX_DIFF_THRESHOLD"] - CONFIG["MIN_DIFF_THRESHOLD"])
     return max(CONFIG["MIN_DIFF_THRESHOLD"], min(CONFIG["MAX_DIFF_THRESHOLD"], t))
 
-def align_background(prev, curr):
-    """使用相位相关进行全局平移对齐，返回对齐后的帧和是否有平移"""
-    diff = cv2.absdiff(prev, curr)
-    if np.mean(diff) < 2.0:
-        return curr, False
-    try:
-        dx, dy = cv2.phaseCorrelate(np.float32(prev), np.float32(curr))[0]
-        if abs(dx) < 0.5 and abs(dy) < 0.5:
-            return curr, False
-        h, w = curr.shape
-        M = np.float32([[1, 0, -dx], [0, 1, -dy]])
-        aligned = cv2.warpAffine(curr, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
-        return aligned, True
-    except:
-        return curr, False
 
-def get_subtitle_mask(gray_img, bottom_ratio):
-    """基于梯度生成底部字幕区域的掩膜（0=字幕区域，255=非字幕区域）"""
-    h, w = gray_img.shape
-    cut_line = int(h * (1 - bottom_ratio))
-    roi = gray_img[cut_line:, :]
-    grad_x = cv2.Sobel(roi, cv2.CV_64F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(roi, cv2.CV_64F, 0, 1, ksize=3)
-    grad_mag = np.sqrt(grad_x ** 2 + grad_y ** 2).astype(np.uint8)
-    _, high_contrast = cv2.threshold(grad_mag, CONFIG["SUBTITLE_GRADIENT_THRESH"], 255, cv2.THRESH_BINARY)
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    high_contrast = cv2.morphologyEx(high_contrast, cv2.MORPH_CLOSE, kernel_close)
-    window_size = 21
-    kernel_density = np.ones((window_size, window_size), np.float32) / (window_size ** 2)
-    density_map = cv2.filter2D(high_contrast.astype(np.float32) / 255, -1, kernel_density)
-    high_density = (density_map > CONFIG["SUBTITLE_DENSITY_THRESH"]).astype(np.uint8) * 255
-    full_mask = np.zeros((h, w), dtype=np.uint8)
-    full_mask[cut_line:, :] = high_density
-    return full_mask
 
-def get_bottom_subtitle_mask(curr_gray):
-    """
-    返回与 curr_gray 同尺寸的掩膜：
-    底部字幕区域为 0，其余区域为 255。
-    若 SUBTITLE_BOTTOM_RATIO == 0，则返回全 255。
-    """
-    h, w = curr_gray.shape
-    subtitle_ratio = CONFIG.get("SUBTITLE_BOTTOM_RATIO", 0)
-    if subtitle_ratio <= 0:
-        return np.full((h, w), 255, dtype=np.uint8)
-    mask = np.ones((h, w), dtype=np.uint8) * 255
-    bottom_cut = int(h * (1 - subtitle_ratio))
-    if CONFIG.get("SUBTITLE_CONTRAST_FILTER", True):
-        sub_mask = get_subtitle_mask(curr_gray, subtitle_ratio)
-        mask[bottom_cut:, :] = sub_mask[bottom_cut:, :]
-    else:
-        mask[bottom_cut:, :] = 0
-    return mask
+
+
+# ======================== 原始变化检测 ========================
 
 def is_raw_change(prev, curr):
-    """原始变化检测"""
+    """原始变化检测（仅基于差分面积比）"""
     diff = cv2.absdiff(prev, curr)
     thresh = adaptive_threshold(curr)
     _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
@@ -371,9 +346,24 @@ def is_raw_change(prev, curr):
     ratio = np.count_nonzero(mask) / mask.size
     return ratio >= CONFIG["MIN_CHANGE_RATIO"]
 
+
+
+def fast_global_corr(img1, img2):
+    """快速计算两幅等尺寸灰度图的整体归一化相关系数（-1~1）"""
+    f1 = img1.astype(np.float64).ravel()
+    f2 = img2.astype(np.float64).ravel()
+    m1 = np.mean(f1)
+    m2 = np.mean(f2)
+    num = np.dot(f1 - m1, f2 - m2)
+    den = np.sqrt(np.dot(f1 - m1, f1 - m1) * np.dot(f2 - m2, f2 - m2))
+    if den < 1e-10:
+        return 1.0
+    return num / den
+# ======================== 基础检测 ========================
+
 def basic_is_new_cel(prev, curr):
     """基础检测，返回 (是否为新张, 移动类型描述)"""
-    corr = cv2.matchTemplate(prev, curr, cv2.TM_CCOEFF_NORMED)[0][0]
+    corr = fast_global_corr(prev, curr)   # 替换模板匹配
 
     if corr > CONFIG["BASIC_CORR_THRESHOLD"]:
         raw_diff = cv2.absdiff(prev, curr)
@@ -399,6 +389,8 @@ def basic_is_new_cel(prev, curr):
     if raw_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
         return True, "新作画(基础)"
     return True, "新作画(基础)"
+
+# ======================== 局部运动判断 ========================
 
 def has_local_motion(binary_mask):
     """判断变化掩膜是否为局部运动（如口型）"""
@@ -431,45 +423,115 @@ def has_local_motion(binary_mask):
             return False
     return True
 
-def is_layer_camera_move_v2(prev, curr_aligned, mask):
-    """基于光流判断是否为图层分离运镜"""
+# ======================== 统一运动分析（一次角点，两次光流） ========================
+
+def unified_motion_analysis(prev, curr, use_optical_flow=True):
+    """
+    一次角点提取 + 两次光流追踪，同时完成：
+      - 全局平移估计（返回对齐帧）
+      - 图层分离运镜检测
+      - 缩放运镜检测
+    返回: (has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom)
+    """
+    max_corners = 200
     corners = cv2.goodFeaturesToTrack(
         prev,
-        maxCorners=CONFIG["FLOW_FEATURE_COUNT"],
+        maxCorners=max_corners,
         qualityLevel=CONFIG["FLOW_QUALITY_LEVEL"],
         minDistance=CONFIG["FLOW_MIN_DISTANCE"],
-        mask=mask
+        mask=None
     )
+
+    # 默认值
+    has_shift = False
+    dx, dy = 0.0, 0.0
+    curr_aligned = curr
+    is_layer_move = False
+    is_zoom = False
+
     if corners is None:
-        return False
+        return has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom
+
     p1 = np.float32(corners).reshape(-1, 2)
-    p2, status, _ = cv2.calcOpticalFlowPyrLK(prev, curr_aligned, p1, None)
-    if p2 is None:
-        return False
-    valid = status.flatten() == 1
-    if np.sum(valid) < CONFIG["LAYER_MIN_VALID_POINTS"]:
-        return False
-    vecs = p2[valid] - p1[valid]
-    norms = np.linalg.norm(vecs, axis=1)
-    moving = norms > CONFIG["FLOW_LAYER_STATIC_THRESH"]
-    n_moving = np.sum(moving)
-    if n_moving < CONFIG["LAYER_MIN_MOVING_POINTS"]:
-        return False
-    moving_vecs = vecs[moving]
-    mean_vec = np.mean(moving_vecs, axis=0)
-    if np.linalg.norm(mean_vec) < CONFIG["LAYER_MEAN_VEC_MIN"]:
-        return False
-    cos_sim = np.dot(moving_vecs, mean_vec) / (
-                np.linalg.norm(moving_vecs, axis=1) * np.linalg.norm(mean_vec) + 1e-8)
-    consistency = np.mean(cos_sim > CONFIG["LAYER_COS_SIM_THRESH"])
-    if consistency > CONFIG["LAYER_DIRECTION_CONSISTENCY"]:
-        return True
-    else:
-        return False
+
+    # 第一次追踪：prev -> curr，估计全局平移
+    p2_curr, status_curr, _ = cv2.calcOpticalFlowPyrLK(prev, curr, p1, None)
+    if p2_curr is not None and np.sum(status_curr) >= 20:
+        valid = status_curr.flatten() == 1
+        vecs_curr = p2_curr[valid] - p1[valid]
+        dx = np.median(vecs_curr[:, 0])
+        dy = np.median(vecs_curr[:, 1])
+        if np.sqrt(dx*dx + dy*dy) >= 0.3:
+            has_shift = True
+            h, w = curr.shape
+            M = np.float32([[1, 0, -dx], [0, 1, -dy]])
+            curr_aligned = cv2.warpAffine(curr, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    if not use_optical_flow:
+        return has_shift, dx, dy, curr_aligned, False, False
+
+    # 第二次追踪：prev -> curr_aligned，分析残余运动（图层分离 + 缩放）
+    p2_aligned, status_aligned, _ = cv2.calcOpticalFlowPyrLK(prev, curr_aligned, p1, None)
+    if p2_aligned is not None and np.sum(status_aligned) >= 20:
+        valid = status_aligned.flatten() == 1
+        vecs_res = p2_aligned[valid] - p1[valid]
+        pts = p1[valid]
+        norms_res = np.linalg.norm(vecs_res, axis=1)
+
+        # ----- 图层分离检测 -----
+        moving_mask = norms_res > CONFIG["FLOW_LAYER_STATIC_THRESH"]
+        if np.sum(moving_mask) >= CONFIG["LAYER_MIN_MOVING_POINTS"]:
+            moving_vecs = vecs_res[moving_mask]
+            mean_vec = np.mean(moving_vecs, axis=0)
+            if np.linalg.norm(mean_vec) >= CONFIG["LAYER_MEAN_VEC_MIN"]:
+                cos_sim = np.dot(moving_vecs, mean_vec) / (
+                    np.linalg.norm(moving_vecs, axis=1) * np.linalg.norm(mean_vec) + 1e-8
+                )
+                consistency = np.mean(cos_sim > CONFIG["LAYER_COS_SIM_THRESH"])
+                if consistency > CONFIG["LAYER_DIRECTION_CONSISTENCY"]:
+                    is_layer_move = True
+
+        # ----- 缩放检测 -----
+        h, w = prev.shape
+        center = np.array([w/2, h/2])
+        radial_vecs = pts - center
+        radial_norms = np.linalg.norm(radial_vecs, axis=1)
+        far_mask = radial_norms > 5.0
+        if np.sum(far_mask) >= 10:
+            final_mask = far_mask & (norms_res > 0.5)
+            if np.sum(final_mask) >= 10:
+                pts_f = pts[final_mask]
+                vecs_f = vecs_res[final_mask]
+                radial_f = radial_vecs[final_mask]
+                radial_n_f = radial_norms[final_mask]
+                vec_n_f = norms_res[final_mask]
+
+                # 方向径向一致性
+                radial_unit = radial_f / (radial_n_f[:, np.newaxis] + 1e-8)
+                vec_unit = vecs_f / (vec_n_f[:, np.newaxis] + 1e-8)
+                cos_sim_rad = np.abs(np.sum(vec_unit * radial_unit, axis=1))
+                consistency_rad = np.mean(cos_sim_rad > 0.85)
+
+                # 位移大小与距离中心的相关性
+                if consistency_rad >= CONFIG.get("ZOOM_DIRECTION_CONSISTENCY", 0.7):
+                    if len(vec_n_f) > 5:
+                        corr = np.corrcoef(radial_n_f, vec_n_f)[0, 1]
+                        if corr >= CONFIG.get("ZOOM_RADIAL_CORRELATION", 0.3):
+                            is_zoom = True
+
+    return has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom
+
+
+# ======================== 完整检测 ========================
 
 def full_is_new_cel(prev, curr, use_optical_flow):
-    """完整检测，返回 (是否为新张, 移动类型描述)"""
-    corr = cv2.matchTemplate(prev, curr, cv2.TM_CCOEFF_NORMED)[0][0]
+    """
+    完整检测，返回 (是否为新张, 移动类型描述)
+    使用统一运动分析进行全局平移、图层分离、缩放检测，
+    并对齐后差分，结合局部运动、相似度等进行综合判断。
+    """
+    # 相关性及初始差分检查（用于极慢平移/静止直接返回）
+    corr = fast_global_corr(prev, curr)  # 替换模板匹配
+
     if corr > CONFIG["FULL_CORR_THRESHOLD"]:
         raw_diff = cv2.absdiff(prev, curr)
         raw_thresh = adaptive_threshold(curr)
@@ -483,28 +545,36 @@ def full_is_new_cel(prev, curr, use_optical_flow):
     _, raw_mask = cv2.threshold(raw_diff, diff_thresh, 255, cv2.THRESH_BINARY)
     raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
 
-    # 对齐后差分（不再使用字幕掩膜）
-    curr_aligned, has_shift = align_background(prev, curr)
+    # 统一运动分析（替代原来的独立全局平移估计和图层分离检测）
+    has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom = unified_motion_analysis(prev, curr)
+
+    # 对齐后差分
     diff = cv2.absdiff(prev, curr_aligned)
     _, mask = cv2.threshold(diff, diff_thresh, 255, cv2.THRESH_BINARY)
     kernel = np.ones((3, 3), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     change_ratio = np.count_nonzero(mask) / mask.size
 
+    # 全局平移过滤：有平移 + 对齐后变化小 → 不是新张
     if raw_ratio >= CONFIG["MIN_CHANGE_RATIO"] and change_ratio < CONFIG["ALIGNED_CHANGE_THRESHOLD"] and has_shift:
         return False, "全局平移"
 
+    # 进一步分析（变化面积超过对齐阈值）
     if change_ratio >= CONFIG["ALIGNED_CHANGE_THRESHOLD"]:
         if has_local_motion(mask):
             return True, "新作画"
 
-        # 光流图层分离（不再叠加字幕掩膜）
-        if use_optical_flow and is_layer_camera_move_v2(prev, curr_aligned, mask):
+        # 图层分离运镜
+        if use_optical_flow and is_layer_move:
             return False, "图层分离运镜"
+        # 缩放运镜
+        if use_optical_flow and is_zoom:
+            return False, "缩放运镜"
 
         if change_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
             return True, "新作画"
 
+    # 剩余微小变化的补充检查
     if change_ratio < CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
         mask_inv = cv2.bitwise_not(mask)
         score = cv2.matchTemplate(prev, curr_aligned, cv2.TM_CCOEFF_NORMED, mask=mask_inv)[0][0]
@@ -514,6 +584,10 @@ def full_is_new_cel(prev, curr, use_optical_flow):
     return True, "新作画"
 # ====== Module: preview.py ======
 # preview.py
+"""
+实时预览模块：生成叠加了稠密光流、差分热力图、稀疏光流的预览图像。
+"""
+
 import cv2
 import numpy as np
 import time
@@ -526,8 +600,10 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+
 class PreviewManager:
     """管理预览状态与图像生成"""
+
     def __init__(self):
         self.active = False
         self.thread = None
@@ -539,7 +615,7 @@ class PreviewManager:
         self.motion_history = None
 
         # 显示标志
-        self.show_dense = True
+        self.show_dense = None
         self.show_sparse = True
         self.show_curr = True
         self.show_diff = True
@@ -550,11 +626,13 @@ class PreviewManager:
         self._root = None
 
     def set_callbacks(self, get_cache_cb, update_image_cb, root):
+        """设置预览所需的数据源和更新方法"""
         self._get_cache_cb = get_cache_cb
         self._update_image_cb = update_image_cb
         self._root = root
 
     def start(self):
+        """启动预览线程"""
         if not PIL_AVAILABLE:
             import tkinter.messagebox as messagebox
             messagebox.showwarning("预览不可用", "请安装 Pillow 库: pip install Pillow")
@@ -566,12 +644,14 @@ class PreviewManager:
         self.thread.start()
 
     def stop(self):
+        """停止预览线程"""
         self.active = False
         if self.thread is not None:
             self.thread.join(timeout=0.5)
             self.thread = None
 
     def _loop(self):
+        """预览主循环，定时获取最新帧并生成预览图"""
         while self.active:
             if self._get_cache_cb:
                 last, curr = self._get_cache_cb()
@@ -582,13 +662,17 @@ class PreviewManager:
             time.sleep(self.update_interval)
 
     def make_preview_image(self, last, curr):
-        """根据当前标志生成叠加预览图像"""
+        """
+        根据当前帧和上一帧生成叠加预览图像。
+        包含：稠密光流、差分热力图（带衰减）、稀疏光流拖影。
+        """
+        # 基础层：当前帧灰度转 BGR
         if self.show_curr:
             base = cv2.cvtColor(curr, cv2.COLOR_GRAY2BGR)
         else:
             base = np.zeros((curr.shape[0], curr.shape[1], 3), dtype=np.uint8)
 
-        # 稠密光流
+        # ---------- 稠密光流 ----------
         if self.show_dense and last is not None and last.shape == curr.shape:
             try:
                 flow = cv2.calcOpticalFlowFarneback(last, curr, None, 0.5, 3, 15, 3, 5, 1.2, 0)
@@ -603,39 +687,42 @@ class PreviewManager:
             except Exception:
                 pass
 
-        # 差分热力图
+        # ---------- 差分热力图（带衰减） ----------
         if self.show_diff and last is not None and last.shape == curr.shape:
             diff = cv2.absdiff(last, curr)
             thresh = adaptive_threshold(curr)
             _, diff_mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
 
+            # 仅保留超过阈值的差分区域
             diff_filtered = np.where(diff_mask > 0, diff, 0).astype(np.float32)
             if diff_filtered.max() > 0:
                 diff_norm = diff_filtered / diff_filtered.max()
             else:
                 diff_norm = np.zeros_like(diff_filtered)
+
             decay_factor = CONFIG["PREVIEW_DIFF_DECAY"]
             if self.diff_decay is None or self.diff_decay.shape != diff_norm.shape:
                 self.diff_decay = np.zeros_like(diff_norm)
             combined = np.maximum(diff_norm, self.diff_decay * decay_factor)
             self.diff_decay = combined.copy()
+
             combined_u8 = (combined * 255).astype(np.uint8)
             heat = cv2.applyColorMap(combined_u8, cv2.COLORMAP_HOT)
             base = cv2.addWeighted(base, 0.6, heat, 0.4, 0)
         else:
+            # 如果关闭了差分显示，让残留逐渐衰减
             if self.diff_decay is not None:
                 self.diff_decay *= 0.7
 
-        # 稀疏光流
+        # ---------- 稀疏光流拖影 ----------
         if self.show_sparse and last is not None and last.shape == curr.shape:
             try:
-                # 不再构造字幕特征掩膜，直接在全图检测角点
                 corners = cv2.goodFeaturesToTrack(
                     last,
                     maxCorners=CONFIG["FLOW_FEATURE_COUNT"],
                     qualityLevel=CONFIG["FLOW_QUALITY_LEVEL"],
                     minDistance=CONFIG["FLOW_MIN_DISTANCE"],
-                    mask=None
+                    mask=None                     # 全图检测，不再使用字幕掩膜
                 )
                 if corners is not None:
                     p1 = np.float32(corners).reshape(-1, 2)
@@ -657,6 +744,7 @@ class PreviewManager:
                             dx = pt2[0] - pt1[0]
                             dy = pt2[1] - pt1[1]
                             speed = np.sqrt(dx * dx + dy * dy)
+                            # 颜色映射：快速移动偏蓝，慢速偏红
                             hue = int(240 * (1 - min(speed, max_speed) / max_speed))
                             color_bgr = cv2.cvtColor(
                                 np.array([[[hue, 255, 255]]], dtype=np.uint8),
@@ -674,11 +762,14 @@ class PreviewManager:
 
     def update_image_on_label(self, combined, label):
         """将图像更新到 tkinter Label 上（需在主线程调用）"""
+        if not label.winfo_exists():
+            return
         rgb = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb)
         label_w = label.winfo_width()
         label_h = label.winfo_height()
         if label_w > 1 and label_h > 1:
+            # 按比例缩放并居中显示
             img_w, img_h = pil_img.size
             scale = min(label_w / img_w, label_h / img_h)
             new_w = int(img_w * scale)
@@ -787,7 +878,8 @@ def create_settings_window(parent, counter):
             counter.settings_canvas.unbind_all("<MouseWheel>")
         counter._settings_win = None
         counter.settings_wave_canvas = None
-        counter._stop_preview()
+        # 修复这一行
+        counter.preview_manager.stop()  # 原来为 counter._stop_preview()
         if hasattr(counter, '_crop_window') and counter._crop_window:
             counter._crop_window.destroy()
         win.destroy()
@@ -1184,7 +1276,7 @@ class AnimeCelCounter:
         else:
             base_dir = os.path.dirname(os.path.abspath(__file__))
         self.readme_path = os.path.join(base_dir, "README.txt")
-
+        self._drag_data = {'start_x': 0, 'start_y': 0, 'dragging': False}
         self._settings_win = None
         self.lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -1229,7 +1321,7 @@ class AnimeCelCounter:
         self.total_still_filtered = 0
         self.total_local_filtered = 0
         self.total_other_unknown_filtered = 0
-
+        self.total_zoom_filtered = 0
         self.load_settings()
 
         self.frame_buffer = deque(maxlen=CONFIG["FRAME_BUFFER_SIZE"])
@@ -1365,14 +1457,30 @@ class AnimeCelCounter:
 
     def make_draggable(self):
         def start(e):
-            self.drag_x = e.x
-            self.drag_y = e.y
+            # 任何子控件点击都会冒泡到这里，记录起始位置
+            self._drag_data['start_x'] = e.x_root
+            self._drag_data['start_y'] = e.y_root
+            self._drag_data['dragging'] = False
+
         def move(e):
-            dx = e.x - self.drag_x
-            dy = e.y - self.drag_y
-            self.root.geometry(f"+{self.root.winfo_x() + dx}+{self.root.winfo_y() + dy}")
+            if not hasattr(self, '_drag_data'):
+                return
+            dx = e.x_root - self._drag_data['start_x']
+            dy = e.y_root - self._drag_data['start_y']
+            # 移动超过5像素才视为拖动
+            if abs(dx) > 5 or abs(dy) > 5:
+                self._drag_data['dragging'] = True
+                self.root.geometry(f"+{self.root.winfo_x() + dx}+{self.root.winfo_y() + dy}")
+                # 更新起始点，防止窗口跳跃
+                self._drag_data['start_x'] = e.x_root
+                self._drag_data['start_y'] = e.y_root
+
+        def release(e):
+            self._drag_data['dragging'] = False
+
         self.root.bind("<Button-1>", start)
         self.root.bind("<B1-Motion>", move)
+        self.root.bind("<ButtonRelease-1>", release)
 
     def _draw_buttons(self):
         canvas = self.btn_canvas
@@ -1400,8 +1508,13 @@ class AnimeCelCounter:
                                          text=text, fill=accent,
                                          font=("Arial", 9, "bold"),
                                          activefill="#FFD700")
-            canvas.tag_bind(rect_id, "<Button-1>", lambda e, c=cmd: c())
-            canvas.tag_bind(text_id, "<Button-1>", lambda e, c=cmd: c())
+
+            def safe_cmd(cmd):
+                if not self._drag_data['dragging']:
+                    cmd()
+
+            canvas.tag_bind(rect_id, "<ButtonRelease-1>", lambda e, c=cmd: safe_cmd(c))
+            canvas.tag_bind(text_id, "<ButtonRelease-1>", lambda e, c=cmd: safe_cmd(c))
             canvas.tag_bind(rect_id, "<Enter>",
                             lambda e, r=rect_id: canvas.itemconfig(r, fill="#111111"))
             canvas.tag_bind(rect_id, "<Leave>",
@@ -1495,15 +1608,12 @@ class AnimeCelCounter:
             "JingzhiShiJian": "静止自动暂停(秒)",
             "WAVE_MAX_Y": "波形Y轴最大值",
             "CROP_RATIO": "截图区域比例",
-            "DIFF_THRESHOLD": "变化检测阈值",
             "MIN_DIFF_THRESHOLD": "最小变化阈值",
             "MAX_DIFF_THRESHOLD": "最大变化阈值",
             "MIN_CHANGE_RATIO": "最小变化占比",
             "ALIGNED_CHANGE_THRESHOLD": "平移对齐残差",
             "SIGNIFICANT_CHANGE_RATIO": "显著变化占比",
             "FLOW_FEATURE_COUNT": "光流特征点数",
-            "FLOW_STATIC_THRESH": "静止点位移阈值",
-            "FLOW_MEDIAN_SHIFT_MIN": "主平移最小阈值",
             "FRAME_BUFFER_SIZE": "哈希缓冲区大小",
             "HASH_THRESHOLD": "哈希距离阈值",
             "TOTAL_WAVE_REFRESH_SEC": "总张数波形刷新(秒)",
@@ -1512,7 +1622,6 @@ class AnimeCelCounter:
             "FULL_FILTER_HOLD_SEC": "完整过滤保持(秒)",
             "BASIC_CORR_THRESHOLD": "基础检测相似度阈值",
             "BASIC_MIN_RAW_RATIO_STILL": "基础静止变化面积",
-            "BASIC_SIGNIFICANT_RATIO": "基础大面积阈值",
             "FULL_CORR_THRESHOLD": "完整检测相似度阈值",
             "FULL_STILL_RATIO": "完整静止变化面积",
             "LOCAL_AREA_THRESH": "局部面积占比下限",
@@ -1523,28 +1632,36 @@ class AnimeCelCounter:
             "LAYER_DIRECTION_CONSISTENCY": "光流方向一致性",
             "LAYER_MEAN_VEC_MIN": "光流主方向最小模长",
             "LAYER_COS_SIM_THRESH": "光流夹角阈值",
+            "FLOW_LAYER_STATIC_THRESH": "残余移动阈值",
+            "FLOW_QUALITY_LEVEL": "角点质量阈值",
+            "FLOW_MIN_DISTANCE": "角点最小间距",
             "PREVIEW_DENSE_ALPHA": "预览稠密光流透明度",
             "PREVIEW_DIFF_DECAY": "预览差分衰减",
             "PREVIEW_MOTION_DECAY": "预览运动衰减",
             "PREVIEW_MOTION_MAX_SPEED": "预览最大速度",
+            "ZOOM_DIRECTION_CONSISTENCY": "缩放径向一致性",
+            "ZOOM_RADIAL_CORRELATION": "缩放距离相关度",
         }
-        entries = {}
+
         groups = [
-            ("基本", ["REFRESH_INTERVAL", "SCALE_FACTOR", "SSIM_THRESHOLD", "JingzhiShiJian", "CROP_RATIO","ALPHA"]),
+            ("基本", ["REFRESH_INTERVAL", "SCALE_FACTOR", "SSIM_THRESHOLD", "JingzhiShiJian", "CROP_RATIO", "ALPHA"]),
             ("波形1", ["WAVE_HISTORY_SEC", "WAVE_REFRESH_MS"]),
             ("波形2", ["WAVE2_HISTORY_SEC", "WAVE2_REFRESH_MS", "WAVE_MAX_Y"]),
-            ("变化检测", ["DIFF_THRESHOLD", "MIN_DIFF_THRESHOLD", "MAX_DIFF_THRESHOLD", "MIN_CHANGE_RATIO",
+            ("变化检测", ["MIN_DIFF_THRESHOLD", "MAX_DIFF_THRESHOLD", "MIN_CHANGE_RATIO",
                           "ALIGNED_CHANGE_THRESHOLD", "SIGNIFICANT_CHANGE_RATIO"]),
-            ("光流法", ["FLOW_FEATURE_COUNT", "FLOW_STATIC_THRESH", "FLOW_MEDIAN_SHIFT_MIN"]),
+            ("光流法", ["FLOW_FEATURE_COUNT", "FLOW_QUALITY_LEVEL", "FLOW_MIN_DISTANCE",
+                        "FLOW_LAYER_STATIC_THRESH"]),
             ("重复帧过滤", ["FRAME_BUFFER_SIZE", "HASH_THRESHOLD"]),
             ("总张数波形", ["TOTAL_WAVE_REFRESH_SEC"]),
             ("动态过滤触发", ["FILTER_TRIGGER_WINDOW_MS", "FILTER_TRIGGER_COUNT", "FULL_FILTER_HOLD_SEC"]),
-            ("基础检测常量", ["BASIC_CORR_THRESHOLD", "BASIC_MIN_RAW_RATIO_STILL", "BASIC_SIGNIFICANT_RATIO"]),
+            ("基础检测常量", ["BASIC_CORR_THRESHOLD", "BASIC_MIN_RAW_RATIO_STILL"]),
             ("完整检测常量", ["FULL_CORR_THRESHOLD", "FULL_STILL_RATIO"]),
             ("局部运动判断", ["LOCAL_AREA_THRESH", "LOCAL_BBOX_RATIO_MAX", "LOCAL_ASPECT_RATIO_MAX"]),
             ("光流图层分离", ["LAYER_MIN_VALID_POINTS", "LAYER_MIN_MOVING_POINTS",
                               "LAYER_DIRECTION_CONSISTENCY", "LAYER_MEAN_VEC_MIN", "LAYER_COS_SIM_THRESH"]),
-            ("预览参数", ["PREVIEW_DENSE_ALPHA", "PREVIEW_DIFF_DECAY", "PREVIEW_MOTION_DECAY", "PREVIEW_MOTION_MAX_SPEED"]),
+            ("缩放运镜", ["ZOOM_DIRECTION_CONSISTENCY", "ZOOM_RADIAL_CORRELATION"]),
+            ("预览参数",
+             ["PREVIEW_DENSE_ALPHA", "PREVIEW_DIFF_DECAY", "PREVIEW_MOTION_DECAY", "PREVIEW_MOTION_MAX_SPEED"]),
         ]
 
         self.crop_ratio_label_var = tk.StringVar()
@@ -1556,7 +1673,7 @@ class AnimeCelCounter:
         entries = {}
         left_frame = tk.Frame(scroll_frame, bg=bg)
         right_frame = tk.Frame(scroll_frame, bg=bg)
-        left_frame.grid(row=0, column=0, sticky="nw", padx=(0, 10))
+        left_frame.grid(row=0, column=0, sticky="nw", padx=(0, 5))
         right_frame.grid(row=0, column=1, sticky="nw")
 
         for idx, (group_name, keys) in enumerate(groups):
@@ -1572,28 +1689,32 @@ class AnimeCelCounter:
                 else:
                     label_text = param_names.get(key, key) + ":"
                     tk.Label(target, text=label_text, fg=accent, bg=bg,
-                             font=("Arial", 9)).grid(row=row, column=0, sticky="w", padx=5)
+                             font=("Arial", 9)).grid(row=row, column=0, sticky="w", padx=(0, 2))
                 var = tk.StringVar(value=str(CONFIG[key]))
-                ent = tk.Entry(target, textvariable=var, width=10,
+                ent = tk.Entry(target, textvariable=var, width=5,     #数值格子长度
                                font=("Arial", 9), bg=btn_bg, fg=accent,
                                insertbackground=accent)
-                ent.grid(row=row, column=1, sticky="w")
+                ent.grid(row=row, column=1, sticky="w", padx=(2, 0))              #创建输入框的行
                 entries[key] = var
                 row += 1
 
+        # 功能开关
         row_left = left_frame.grid_size()[1]
         tk.Label(left_frame, text="功能开关", font=("Arial", 10, "bold"),
                  fg=accent, bg=bg).grid(row=row_left, column=0, columnspan=2, sticky="w", pady=(10, 2))
         row_left += 1
         flow_var = tk.BooleanVar(value=self.use_optical_flow)
         tk.Checkbutton(left_frame, text="启用光流法图层分离", variable=flow_var,
-                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w", padx=5)
+                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w",
+                                                                  padx=5)
         row_left += 1
         hash_var = tk.BooleanVar(value=self.use_hash_filter)
         tk.Checkbutton(left_frame, text="启用重复帧过滤", variable=hash_var,
-                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w", padx=5)
+                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w",
+                                                                  padx=5)
         row_left += 1
 
+        # 全局调色板
         tk.Label(left_frame, text="全局调色板", font=("Arial", 10, "bold"),
                  fg=accent, bg=bg).grid(row=row_left, column=0, columnspan=2, sticky="w", pady=(10, 2))
         row_left += 1
@@ -1601,19 +1722,26 @@ class AnimeCelCounter:
 
         def toggle_custom_colors():
             CONFIG["USE_CUSTOM_COLORS"] = self.custom_color_var.get()
-            for child in color_frame.winfo_children():
-                if isinstance(child, tk.Entry) or isinstance(child, tk.Button):
-                    child.configure(state="normal" if CONFIG["USE_CUSTOM_COLORS"] else "disabled")
+            if CONFIG["USE_CUSTOM_COLORS"]:
+                color_frame.grid()  # 重新显示
+                for child in color_frame.winfo_children():
+                    if isinstance(child, tk.Entry) or isinstance(child, tk.Button):
+                        child.configure(state="normal")
+            else:
+                color_frame.grid_remove()  # 隐藏
             color_manager.apply_theme()
             self._redraw_all()
 
         tk.Checkbutton(left_frame, text="启用自定义调色板", variable=self.custom_color_var,
                        command=toggle_custom_colors,
-                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w", padx=5)
+                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w",
+                                                                  padx=5)
         row_left += 1
 
         color_frame = tk.Frame(left_frame, bg=bg)
         color_frame.grid(row=row_left, column=0, columnspan=2, sticky="we", padx=5)
+        if not CONFIG["USE_CUSTOM_COLORS"]:
+            color_frame.grid_remove() # 不启用时默认隐藏
         row_left += 1
 
         color_keys = [
@@ -1622,19 +1750,22 @@ class AnimeCelCounter:
             ("wave_line_filtered", "波形1过滤后"), ("wave_line_raw", "波形1过滤前"),
             ("filter_translation", "平移过滤"), ("filter_optical_flow", "光流过滤"),
             ("filter_hash", "哈希过滤"), ("filter_still", "静止过滤"),
-            ("filter_local", "局部过滤"), ("filter_other", "其他过滤"),
+            ("filter_local", "局部过滤"), ("filter_zoom", "缩放过滤"),
+            ("filter_other", "其他过滤"),
             ("filter_raw_total", "过滤前总张数"), ("filter_filtered_total", "过滤后总张数")
         ]
         self.color_vars = {}
         row_color = 0
         for key, name in color_keys:
-            tk.Label(color_frame, text=name+":", fg=accent, bg=bg).grid(row=row_color, column=0, sticky="w")
+            tk.Label(color_frame, text=name + ":", fg=accent, bg=bg).grid(row=row_color, column=0, sticky="w")
             var = tk.StringVar(value=CONFIG["COLORS"].get(key, "#FFFFFF"))
             ent = tk.Entry(color_frame, textvariable=var, width=8, bg=btn_bg, fg=accent,
                            state="normal" if CONFIG["USE_CUSTOM_COLORS"] else "disabled")
             ent.grid(row=row_color, column=1, sticky="w")
+
             def make_color_callback(k, v):
                 return lambda: self._pick_color(k, v)
+
             btn = tk.Button(color_frame, text="  ", bg=var.get(), command=make_color_callback(key, var),
                             state="normal" if CONFIG["USE_CUSTOM_COLORS"] else "disabled")
             btn.grid(row=row_color, column=2, padx=2)
@@ -1655,6 +1786,7 @@ class AnimeCelCounter:
         btn_frame = tk.Frame(left_frame, bg=bg)
         btn_frame.grid(row=row_left, column=0, columnspan=2, pady=10)
 
+        # 布局管理（右侧）
         row_right = right_frame.grid_size()[1]
         tk.Label(right_frame, text="布局管理", font=("Arial", 10, "bold"),
                  fg=accent, bg=bg).grid(row=row_right, column=0, columnspan=2, sticky="w", pady=(10, 2))
@@ -1668,6 +1800,7 @@ class AnimeCelCounter:
             for name in self.layouts.keys():
                 display = f"* {name}" if name == self.active_layout else name
                 layout_listbox.insert(tk.END, display)
+
         update_layout_list()
 
         btn_frame_layout = tk.Frame(right_frame, bg=bg)
@@ -1727,6 +1860,7 @@ class AnimeCelCounter:
         tk.Button(btn_frame_layout, text="设为当前", command=set_active_layout,
                   bg=btn_bg, fg=accent).pack(side="left", padx=2)
 
+        # 保存/恢复按钮
         def save_settings():
             for key, var in entries.items():
                 try:
@@ -1805,10 +1939,10 @@ class AnimeCelCounter:
 
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
         canvas.bind_all("<MouseWheel>", on_mousewheel)
 
         return entries
-
     def _pick_color(self, key, var):
         from tkinter import colorchooser
         color = colorchooser.askcolor(color=var.get(), title=f"选择{key}颜色")
@@ -1937,6 +2071,8 @@ class AnimeCelCounter:
                             self.total_translation_filtered += 1
                         elif move_type == "图层分离运镜":
                             self.total_optical_flow_filtered += 1
+                        elif move_type == "缩放运镜":
+                            self.total_zoom_filtered += 1
                         elif move_type == "极慢平移/静止":
                             self.total_still_filtered += 1
                         elif move_type == "局部变化(过滤)":
@@ -2010,9 +2146,10 @@ class AnimeCelCounter:
                     still_f = self.total_still_filtered
                     local_f = self.total_local_filtered
                     other_f = self.total_other_unknown_filtered
+                    zoom_f = self.total_zoom_filtered
                 self.total_history.append((self.elapsed_time, total_r, total_f,
                                            trans_f, flow_f, hash_f,
-                                           still_f, local_f, other_f))
+                                           still_f, local_f, other_f, zoom_f))
                 self._last_recorded_time = self.elapsed_time
 
             with self.lock:
@@ -2114,7 +2251,7 @@ class AnimeCelCounter:
         self.total_still_filtered = 0
         self.total_local_filtered = 0
         self.total_other_unknown_filtered = 0
-
+        self.total_zoom_filtered = 0
         accent = color_manager.get_color('accent')
         self.lb_rt.config(text="实时张数：0.0 ")
         self.lb_total_time.config(text="运行时长：0.0 s")
@@ -2151,6 +2288,7 @@ class AnimeCelCounter:
             return base + "平移运镜"
         elif mt == "图层分离运镜":
             return base + "多层平移"
+
         elif mt == "局部变化(过滤)":
             return base + "局部变化"
         elif mt == "静止":
@@ -2178,8 +2316,6 @@ class AnimeCelCounter:
             elif v < 13.0:
                 return base + "一拍二"
             elif v < 20.0:
-                return base + "一拍一"
-            else:
                 return base + "高频作画"
 
     def update_wave(self):
@@ -2208,8 +2344,9 @@ class AnimeCelCounter:
         color_filtered = color_manager.get_color('wave_line_filtered')
         color_raw = color_manager.get_color('wave_line_raw')
         data_list = [
-            (self.wave_data, color_filtered),
-            (self.wave_raw_data, color_raw)
+            (self.wave_raw_data, color_raw),
+            (self.wave_data, color_filtered)
+
         ]
         self._draw_wave_multi(self.canvas, data_list,
                               CONFIG["WAVE_HISTORY_SEC"], CONFIG["WAVE_MAX_Y"], "60s")
@@ -2218,8 +2355,8 @@ class AnimeCelCounter:
         color_filtered = color_manager.get_color('wave_line_filtered')
         color_raw = color_manager.get_color('wave_line_raw')
         data_list = [
-            (self.wave2_data, color_filtered),
-            (self.wave2_raw_data, color_raw)
+            (self.wave_raw_data, color_raw),
+            (self.wave_data, color_filtered)
         ]
         self._draw_wave_multi(self.canvas2, data_list,
                               CONFIG["WAVE2_HISTORY_SEC"], CONFIG["WAVE_MAX_Y"], "25min")
@@ -2296,6 +2433,7 @@ class AnimeCelCounter:
         still = [p[6] for p in history]
         local = [p[7] for p in history]
         other_unknown = [p[8] for p in history]
+        zoom = [p[9] for p in history]
 
         min_t = times[0]
         max_t = times[-1]
@@ -2352,6 +2490,7 @@ class AnimeCelCounter:
             (still, color_manager.get_color('filter_still'), '静止过滤'),
             (local, color_manager.get_color('filter_local'), '局部变化过滤'),
             (other_unknown, color_manager.get_color('filter_other'), '其他'),
+            (zoom, color_manager.get_color('filter_zoom'), '缩放过滤'),
         ]
 
         final_values = {}
@@ -2384,7 +2523,8 @@ class AnimeCelCounter:
                 '哈希': last[5] - first[5],
                 '静止': last[6] - first[6],
                 '局部': last[7] - first[7],
-                '其他': last[8] - first[8]
+                '其他': last[8] - first[8],
+                '缩放': last[9] - first[9]
             }
             total_inc = sum(inc.values())
             if total_inc > 0:
@@ -2394,7 +2534,8 @@ class AnimeCelCounter:
                     '哈希': color_manager.get_color('filter_hash'),
                     '静止': color_manager.get_color('filter_still'),
                     '局部': color_manager.get_color('filter_local'),
-                    '其他': color_manager.get_color('filter_other')
+                    '其他': color_manager.get_color('filter_other'),
+                    '缩放': color_manager.get_color('filter_zoom')
                 }
                 bar_w = 80
                 bar_h = 40
@@ -2403,7 +2544,7 @@ class AnimeCelCounter:
                 canvas.create_rectangle(bar_x - 1, bar_y - 1, bar_x + bar_w + 1, bar_y + bar_h + 1,
                                         outline=accent)
                 cum_y = bar_y + bar_h
-                for key in ['平移', '光流', '哈希', '静止', '局部', '其他']:
+                for key in ['平移', '光流', '哈希', '静止', '局部', '其他', '缩放']:
                     val = inc[key]
                     if val <= 0:
                         continue

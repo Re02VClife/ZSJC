@@ -1,10 +1,14 @@
 # preview.py
+"""
+实时预览模块：生成叠加了稠密光流、差分热力图、稀疏光流的预览图像。
+"""
+
 import cv2
 import numpy as np
 import time
 import threading
 from config import CONFIG
-from detection import adaptive_threshold, get_bottom_subtitle_mask, get_subtitle_mask
+from detection import adaptive_threshold    # 仅需差分阈值计算
 
 # 预览功能依赖 PIL
 try:
@@ -13,8 +17,10 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
+
 class PreviewManager:
     """管理预览状态与图像生成"""
+
     def __init__(self):
         self.active = False
         self.thread = None
@@ -26,7 +32,7 @@ class PreviewManager:
         self.motion_history = None
 
         # 显示标志
-        self.show_dense = True
+        self.show_dense = None
         self.show_sparse = True
         self.show_curr = True
         self.show_diff = True
@@ -37,11 +43,13 @@ class PreviewManager:
         self._root = None
 
     def set_callbacks(self, get_cache_cb, update_image_cb, root):
+        """设置预览所需的数据源和更新方法"""
         self._get_cache_cb = get_cache_cb
         self._update_image_cb = update_image_cb
         self._root = root
 
     def start(self):
+        """启动预览线程"""
         if not PIL_AVAILABLE:
             import tkinter.messagebox as messagebox
             messagebox.showwarning("预览不可用", "请安装 Pillow 库: pip install Pillow")
@@ -53,12 +61,14 @@ class PreviewManager:
         self.thread.start()
 
     def stop(self):
+        """停止预览线程"""
         self.active = False
         if self.thread is not None:
             self.thread.join(timeout=0.5)
             self.thread = None
 
     def _loop(self):
+        """预览主循环，定时获取最新帧并生成预览图"""
         while self.active:
             if self._get_cache_cb:
                 last, curr = self._get_cache_cb()
@@ -69,13 +79,17 @@ class PreviewManager:
             time.sleep(self.update_interval)
 
     def make_preview_image(self, last, curr):
-        """根据当前标志生成叠加预览图像"""
+        """
+        根据当前帧和上一帧生成叠加预览图像。
+        包含：稠密光流、差分热力图（带衰减）、稀疏光流拖影。
+        """
+        # 基础层：当前帧灰度转 BGR
         if self.show_curr:
             base = cv2.cvtColor(curr, cv2.COLOR_GRAY2BGR)
         else:
             base = np.zeros((curr.shape[0], curr.shape[1], 3), dtype=np.uint8)
 
-        # 稠密光流
+        # ---------- 稠密光流 ----------
         if self.show_dense and last is not None and last.shape == curr.shape:
             try:
                 flow = cv2.calcOpticalFlowFarneback(last, curr, None, 0.5, 3, 15, 3, 5, 1.2, 0)
@@ -90,39 +104,42 @@ class PreviewManager:
             except Exception:
                 pass
 
-        # 差分热力图
+        # ---------- 差分热力图（带衰减） ----------
         if self.show_diff and last is not None and last.shape == curr.shape:
             diff = cv2.absdiff(last, curr)
             thresh = adaptive_threshold(curr)
             _, diff_mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
 
+            # 仅保留超过阈值的差分区域
             diff_filtered = np.where(diff_mask > 0, diff, 0).astype(np.float32)
             if diff_filtered.max() > 0:
                 diff_norm = diff_filtered / diff_filtered.max()
             else:
                 diff_norm = np.zeros_like(diff_filtered)
+
             decay_factor = CONFIG["PREVIEW_DIFF_DECAY"]
             if self.diff_decay is None or self.diff_decay.shape != diff_norm.shape:
                 self.diff_decay = np.zeros_like(diff_norm)
             combined = np.maximum(diff_norm, self.diff_decay * decay_factor)
             self.diff_decay = combined.copy()
+
             combined_u8 = (combined * 255).astype(np.uint8)
             heat = cv2.applyColorMap(combined_u8, cv2.COLORMAP_HOT)
             base = cv2.addWeighted(base, 0.6, heat, 0.4, 0)
         else:
+            # 如果关闭了差分显示，让残留逐渐衰减
             if self.diff_decay is not None:
                 self.diff_decay *= 0.7
 
-        # 稀疏光流
+        # ---------- 稀疏光流拖影 ----------
         if self.show_sparse and last is not None and last.shape == curr.shape:
             try:
-                # 不再构造字幕特征掩膜，直接在全图检测角点
                 corners = cv2.goodFeaturesToTrack(
                     last,
                     maxCorners=CONFIG["FLOW_FEATURE_COUNT"],
                     qualityLevel=CONFIG["FLOW_QUALITY_LEVEL"],
                     minDistance=CONFIG["FLOW_MIN_DISTANCE"],
-                    mask=None
+                    mask=None                     # 全图检测，不再使用字幕掩膜
                 )
                 if corners is not None:
                     p1 = np.float32(corners).reshape(-1, 2)
@@ -144,6 +161,7 @@ class PreviewManager:
                             dx = pt2[0] - pt1[0]
                             dy = pt2[1] - pt1[1]
                             speed = np.sqrt(dx * dx + dy * dy)
+                            # 颜色映射：快速移动偏蓝，慢速偏红
                             hue = int(240 * (1 - min(speed, max_speed) / max_speed))
                             color_bgr = cv2.cvtColor(
                                 np.array([[[hue, 255, 255]]], dtype=np.uint8),
@@ -161,11 +179,14 @@ class PreviewManager:
 
     def update_image_on_label(self, combined, label):
         """将图像更新到 tkinter Label 上（需在主线程调用）"""
+        if not label.winfo_exists():
+            return
         rgb = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb)
         label_w = label.winfo_width()
         label_h = label.winfo_height()
         if label_w > 1 and label_h > 1:
+            # 按比例缩放并居中显示
             img_w, img_h = pil_img.size
             scale = min(label_w / img_w, label_h / img_h)
             new_w = int(img_w * scale)
