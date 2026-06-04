@@ -1,6 +1,6 @@
 {
   "config": {
-    "USE_CUSTOM_COLORS": false,
+    "USE_CUSTOM_COLORS": true,
     "SHOW_INFO_PANEL": true,
     "SHOW_WAVE1": true,
     "SHOW_WAVE2": true,
@@ -13,13 +13,8 @@
     "WAVE2_REFRESH_MS": 3000,
     "JingzhiShiJian": 60,
     "WAVE_MAX_Y": 24,
-    "CROP_RATIO": 1.0,
-    "CROP_REGION": [
-      34,
-      137,
-      1883,
-      961
-    ],
+    "CROP_RATIO": 0.7,
+    "CROP_REGION": null,
     "ALPHA": 1,
     "MIN_DIFF_THRESHOLD": 5,
     "MAX_DIFF_THRESHOLD": 30,
@@ -29,8 +24,8 @@
     "TOTAL_WAVE_REFRESH_SEC": 2,
     "SIGNIFICANT_CHANGE_RATIO": 0.02,
     "ALIGNED_CHANGE_THRESHOLD": 0.02,
-    "BASIC_CORR_THRESHOLD": 0.995,
-    "BASIC_MIN_RAW_RATIO_STILL": 0.003,
+    "BASIC_CORR_THRESHOLD": 0.996,
+    "BASIC_MIN_RAW_RATIO_STILL": 0.001,
     "FILTER_TRIGGER_WINDOW_MS": 200,
     "FILTER_TRIGGER_COUNT": 3,
     "FULL_FILTER_HOLD_SEC": 5,
@@ -45,7 +40,7 @@
     "LAYER_MEAN_VEC_MIN": 0.1,
     "LAYER_COS_SIM_THRESH": 0.7,
     "FLOW_LAYER_STATIC_THRESH": 2.0,
-    "FLOW_FEATURE_COUNT": 150,
+    "FLOW_FEATURE_COUNT": 200,
     "FLOW_QUALITY_LEVEL": 0.05,
     "FLOW_MIN_DISTANCE": 10,
     "PREVIEW_DENSE_ALPHA": 0.6,
@@ -54,6 +49,11 @@
     "PREVIEW_MOTION_MAX_SPEED": 50,
     "ZOOM_DIRECTION_CONSISTENCY": 0.7,
     "ZOOM_RADIAL_CORRELATION": 0.3,
+    "OPED_DETECTION_ENABLED": true,
+    "OPED_WINDOW_SEC": 90,
+    "OPED_MATCH_THRESHOLD": 0.95,
+    "OPED_HISTORY_HOURS": 12,
+    "OPED_SAMPLE_INTERVAL_SEC": 1.0,
     "COLORS": {
       "accent": "#E6397C",
       "bg": "#000000",
@@ -61,7 +61,7 @@
       "btn_bg": "#222222",
       "title_bg": "#111111",
       "canvas_bg": "#1A1A1D",
-      "wave_line_filtered": "#E6397C",
+      "wave_line_filtered": "#FFA500",
       "wave_line_raw": "#778899",
       "filter_translation": "#88dba3",
       "filter_optical_flow": "#ffff99",
@@ -70,41 +70,36 @@
       "filter_local": "#00FFFF",
       "filter_other": "#888888",
       "filter_raw_total": "#9dc1c6",
-      "filter_filtered_total": "#E6397C",
-      "filter_zoom": "#FFFFFF"
-    },
-    "DIFF_THRESHOLD": 22,
-    "BASIC_SIGNIFICANT_RATIO": 0.02,
-    "FLOW_STATIC_THRESH": 1,
-    "FLOW_MEDIAN_SHIFT_MIN": 0.01,
-    "FLOW_LAYER_CONSISTENCY": 0.7
+      "filter_zoom": "#FFA07A",
+      "filter_filtered_total": "#ff4848"
+    }
   },
   "use_optical_flow": true,
   "use_hash_filter": true,
   "layouts": {
-    "2": {
-      "window_geometry": "564x1001+1345+36",
+    "\u9ed8\u8ba4\u5e03\u5c40": {
+      "window_geometry": "1200x760+415+206",
       "panels": {
         "params": [
-          1,
-          655,
-          559,
-          316
+          50,
+          50,
+          400,
+          650
         ],
         "wave": [
-          0,
-          -8,
-          559,
-          305
+          50,
+          50,
+          600,
+          400
         ],
         "preview": [
-          0,
-          298,
-          560,
-          358
+          50,
+          50,
+          600,
+          400
         ]
       }
     }
   },
-  "active_layout": "2"
+  "active_layout": "\u9ed8\u8ba4\u5e03\u5c40"
 }

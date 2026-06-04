@@ -119,6 +119,13 @@ CONFIG = {
     "ZOOM_DIRECTION_CONSISTENCY": 0.7,  # 缩放运镜径向一致性阈值
     "ZOOM_RADIAL_CORRELATION": 0.3,     # 缩放运镜位移-距离相关系数下限
 
+    # OP/ED 检测
+    "OPED_DETECTION_ENABLED": True,      # 是否启用
+    "OPED_WINDOW_SEC": 90,              # 匹配窗口长度（秒）
+    "OPED_MATCH_THRESHOLD": 0.95,       # 相关系数阈值（过滤前后均需超过）
+    "OPED_HISTORY_HOURS": 12,           # 历史波形最长保存小时
+    "OPED_SAMPLE_INTERVAL_SEC": 1.0,    # 历史采样间隔（秒）
+
     # ========== 颜色方案 ==========
     "COLORS": {
         "accent": "#E6397C",

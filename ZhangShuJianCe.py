@@ -129,6 +129,13 @@ CONFIG = {
     "ZOOM_DIRECTION_CONSISTENCY": 0.7,  # 缩放运镜径向一致性阈值
     "ZOOM_RADIAL_CORRELATION": 0.3,     # 缩放运镜位移-距离相关系数下限
 
+    # OP/ED 检测
+    "OPED_DETECTION_ENABLED": True,      # 是否启用
+    "OPED_WINDOW_SEC": 90,              # 匹配窗口长度（秒）
+    "OPED_MATCH_THRESHOLD": 0.95,       # 相关系数阈值（过滤前后均需超过）
+    "OPED_HISTORY_HOURS": 12,           # 历史波形最长保存小时
+    "OPED_SAMPLE_INTERVAL_SEC": 1.0,    # 历史采样间隔（秒）
+
     # ========== 颜色方案 ==========
     "COLORS": {
         "accent": "#E6397C",
@@ -1270,7 +1277,10 @@ if not DX_AVAILABLE:
     raise ImportError("请安装 dxcam 库: pip install dxcam")
 
 class AnimeCelCounter:
+    """动画作画张数计数器主类，负责屏幕捕获、变化检测、OP/ED识别与统计"""
+
     def __init__(self):
+        # ---------- 基础路径与拖拽数据 ----------
         if getattr(sys, 'frozen', False):
             base_dir = sys._MEIPASS
         else:
@@ -1283,6 +1293,7 @@ class AnimeCelCounter:
         self._run_event = threading.Event()
         self._run_event.set()
 
+        # ---------- 实时统计相关 ----------
         self.recent_frames = deque()
         self.recent_sum = 0
         self.current_cels = 0.0
@@ -1311,10 +1322,12 @@ class AnimeCelCounter:
         self.total_history = deque(maxlen=6000)
         self._last_recorded_time = -1
 
+        # ---------- 动态过滤状态 ----------
         self.full_filter_active = False
         self.full_filter_active_until = 0
         self.raw_detection_timestamps = deque()
 
+        # 各种过滤类型的计数
         self.total_translation_filtered = 0
         self.total_optical_flow_filtered = 0
         self.total_hash_filtered = 0
@@ -1324,9 +1337,31 @@ class AnimeCelCounter:
         self.total_zoom_filtered = 0
         self.load_settings()
 
+        # ---------- OP/ED 检测 ----------
+        self.oped_enabled = CONFIG["OPED_DETECTION_ENABLED"]
+        self.oped_history_time = deque()
+        self.oped_history_filtered = deque()  # 每秒过滤后张数
+        self.oped_history_raw = deque()       # 每秒过滤前张数
+        self.oped_last_sample_time = 0.0
+
+        # 已知 OP/ED 片段模板
+        self.known_segments = []              # 每个元素为 dict
+        self.segment_occurrences = []         # (start_time, end_time, segment_id)
+        self.current_skip_until = 0.0         # 暂停统计直到该时间戳（已废弃，保留兼容）
+        self._pending_oped_start = None       # 匹配成功时记录的片段开始时间
+
+        # OP/ED 累计统计（不重复计数）
+        self.oped_unique_cels = 0             # 不重复 OP/ED 总张数
+        self.oped_unique_time = 0.0           # 不重复 OP/ED 总时长
+        self.oped_unique_count = 0            # 不重复片段个数
+        self.skip_until_abs_time = 0.0        # 绝对跳过截止时间戳
+        self.oped_active_segment = None       # 当前正在跳过的 OP/ED 片段引用
+
+        # ---------- 哈希缓冲区 ----------
         self.frame_buffer = deque(maxlen=CONFIG["FRAME_BUFFER_SIZE"])
         self.hash_threshold = CONFIG["HASH_THRESHOLD"]
 
+        # ---------- 波形数据 ----------
         max_wave_points = int(CONFIG["WAVE_HISTORY_SEC"] * (1000 / CONFIG["WAVE_REFRESH_MS"]))
         self.wave_data = deque(maxlen=max_wave_points)
         self.wave_raw_data = deque(maxlen=max_wave_points)
@@ -1338,6 +1373,7 @@ class AnimeCelCounter:
         self.smooth_cels = 0.0
         self.smooth_raw_cels = 0.0
 
+        # ---------- 屏幕捕获 ----------
         self.camera = dxcam.create(output_color="BGR")
         self.camera.start(target_fps=0, video_mode=False)
 
@@ -1357,10 +1393,10 @@ class AnimeCelCounter:
             self.region = (384, 216, 1536, 864)
             self.frame_shape = (100, 100)
 
-        # 创建预览管理器
+        # ---------- 预览管理器 ----------
         self.preview_manager = PreviewManager()
 
-        # 创建主窗口
+        # ---------- 创建主窗口 ----------
         self.root = tk.Tk()
         self.root.title("动画作画张数")
         self.root.geometry("1200x420")
@@ -1400,6 +1436,7 @@ class AnimeCelCounter:
 
     # ---------- 辅助方法 ----------
     def _compute_region_from_base(self, base_rect, ratio, screen_w, screen_h):
+        """根据基准矩形和缩放比例计算实际截图区域"""
         left, top, right, bottom = base_rect
         cx = (left + right) / 2
         cy = (top + bottom) / 2
@@ -1418,11 +1455,13 @@ class AnimeCelCounter:
         return (int(new_left), int(new_top), int(new_right), int(new_bottom))
 
     def _get_settings_path(self):
+        """获取配置文件路径"""
         if getattr(sys, 'frozen', False):
             return os.path.join(os.path.expanduser("~"), "cel_counter_settings.json")
         return "cel_counter_settings.json"
 
     def load_settings(self):
+        """从 JSON 加载设置"""
         try:
             settings_path = self._get_settings_path()
             with open(settings_path, "r") as f:
@@ -1439,11 +1478,12 @@ class AnimeCelCounter:
             color_manager._config = CONFIG["COLORS"]
         except (FileNotFoundError, json.JSONDecodeError):
             self.use_optical_flow = True
-            self.use_hash_filter = False
+            self.use_hash_filter = True
             self.layouts = {}
             self.active_layout = None
 
     def _save_all_settings(self):
+        """保存所有设置到 JSON 文件"""
         settings = {
             "config": CONFIG,
             "use_optical_flow": self.use_optical_flow,
@@ -1456,8 +1496,8 @@ class AnimeCelCounter:
             json.dump(settings, f, indent=2)
 
     def make_draggable(self):
+        """使主窗口可拖动（无边框窗口）"""
         def start(e):
-            # 任何子控件点击都会冒泡到这里，记录起始位置
             self._drag_data['start_x'] = e.x_root
             self._drag_data['start_y'] = e.y_root
             self._drag_data['dragging'] = False
@@ -1467,11 +1507,9 @@ class AnimeCelCounter:
                 return
             dx = e.x_root - self._drag_data['start_x']
             dy = e.y_root - self._drag_data['start_y']
-            # 移动超过5像素才视为拖动
             if abs(dx) > 5 or abs(dy) > 5:
                 self._drag_data['dragging'] = True
                 self.root.geometry(f"+{self.root.winfo_x() + dx}+{self.root.winfo_y() + dy}")
-                # 更新起始点，防止窗口跳跃
                 self._drag_data['start_x'] = e.x_root
                 self._drag_data['start_y'] = e.y_root
 
@@ -1483,6 +1521,7 @@ class AnimeCelCounter:
         self.root.bind("<ButtonRelease-1>", release)
 
     def _draw_buttons(self):
+        """绘制主界面的功能按钮（设置/暂停/重置/关闭）"""
         canvas = self.btn_canvas
         canvas.delete("all")
         btn_w = 100
@@ -1525,6 +1564,7 @@ class AnimeCelCounter:
                             lambda e, r=rect_id: canvas.itemconfig(r, fill=""))
 
     def open_settings(self):
+        """打开设置窗口"""
         if self._settings_win is not None and self._settings_win.winfo_exists():
             self._settings_win.lift()
             return
@@ -1532,6 +1572,7 @@ class AnimeCelCounter:
         self._settings_win = win
 
     def open_readme(self):
+        """打开 README 说明文件"""
         import subprocess
         path = self.readme_path
         if not os.path.exists(path):
@@ -1550,9 +1591,11 @@ class AnimeCelCounter:
             messagebox.showinfo("说明文件", f"请手动打开文件：\n{path}")
 
     def show_crop_region(self):
+        """显示截图范围调整窗口"""
         create_crop_window(self)
 
     def _apply_layout(self, win, panels):
+        """应用已保存的窗口布局"""
         def set_panels(attempt=0):
             if win.winfo_width() < 100:
                 if attempt < 5:
@@ -1579,8 +1622,12 @@ class AnimeCelCounter:
                         panels[name].apply_geometry(geom)
         win.after(200, set_panels)
 
-    # ---------- 设置窗口内容构建（保留在类中，因为回调需要self） ----------
+    # ---------- 设置窗口内容构建 ----------
     def _build_params_content(self, parent, win, panels):
+        """
+        构建设置窗口中的参数内容（可滚动区域）。
+        返回包含所有配置项输入变量的字典。
+        """
         canvas = tk.Canvas(parent, borderwidth=0, highlightthickness=0,
                            bg=color_manager.get_color('bg'))
         scrollbar = tk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -1596,16 +1643,17 @@ class AnimeCelCounter:
         bg = color_manager.get_color('bg')
         btn_bg = color_manager.get_color('btn_bg')
 
+        # 参数中文显示名
         param_names = {
             "REFRESH_INTERVAL": "UI刷新间隔",
             "ALPHA": "背景透明度",
             "SCALE_FACTOR": "截图缩放比例",
             "SSIM_THRESHOLD": "背景相似度阈值",
-            "WAVE_HISTORY_SEC": "波形1时长(秒)",
-            "WAVE_REFRESH_MS": "波形1刷新间隔(ms)",
-            "WAVE2_HISTORY_SEC": "波形2时长(秒)",
+            "WAVE_HISTORY_SEC": "波形1时长(s)",
+            "WAVE_REFRESH_MS": "波形1刷新(ms)",
+            "WAVE2_HISTORY_SEC": "波形2时长(s)",
             "WAVE2_REFRESH_MS": "波形2刷新间隔(ms)",
-            "JingzhiShiJian": "静止自动暂停(秒)",
+            "JingzhiShiJian": "静止自动暂停(s)",
             "WAVE_MAX_Y": "波形Y轴最大值",
             "CROP_RATIO": "截图区域比例",
             "MIN_DIFF_THRESHOLD": "最小变化阈值",
@@ -1616,33 +1664,39 @@ class AnimeCelCounter:
             "FLOW_FEATURE_COUNT": "光流特征点数",
             "FRAME_BUFFER_SIZE": "哈希缓冲区大小",
             "HASH_THRESHOLD": "哈希距离阈值",
-            "TOTAL_WAVE_REFRESH_SEC": "总张数波形刷新(秒)",
+            "TOTAL_WAVE_REFRESH_SEC": "总张数波形刷新(s)",
             "FILTER_TRIGGER_WINDOW_MS": "触发窗口(ms)",
             "FILTER_TRIGGER_COUNT": "触发张数阈值",
-            "FULL_FILTER_HOLD_SEC": "完整过滤保持(秒)",
-            "BASIC_CORR_THRESHOLD": "基础检测相似度阈值",
+            "FULL_FILTER_HOLD_SEC": "完整过滤保持(s)",
+            "BASIC_CORR_THRESHOLD": "相似度阈值",
             "BASIC_MIN_RAW_RATIO_STILL": "基础静止变化面积",
-            "FULL_CORR_THRESHOLD": "完整检测相似度阈值",
-            "FULL_STILL_RATIO": "完整静止变化面积",
+            "FULL_CORR_THRESHOLD": "相似度阈值",
+            "FULL_STILL_RATIO": "静止变化面积",
             "LOCAL_AREA_THRESH": "局部面积占比下限",
             "LOCAL_BBOX_RATIO_MAX": "局部包围盒上限",
             "LOCAL_ASPECT_RATIO_MAX": "局部宽高比上限",
             "LAYER_MIN_VALID_POINTS": "光流最小有效点数",
             "LAYER_MIN_MOVING_POINTS": "光流最小移动点数",
             "LAYER_DIRECTION_CONSISTENCY": "光流方向一致性",
-            "LAYER_MEAN_VEC_MIN": "光流主方向最小模长",
-            "LAYER_COS_SIM_THRESH": "光流夹角阈值",
+            "LAYER_MEAN_VEC_MIN": "主方向最小模长",
+            "LAYER_COS_SIM_THRESH": "夹角阈值",
             "FLOW_LAYER_STATIC_THRESH": "残余移动阈值",
             "FLOW_QUALITY_LEVEL": "角点质量阈值",
             "FLOW_MIN_DISTANCE": "角点最小间距",
-            "PREVIEW_DENSE_ALPHA": "预览稠密光流透明度",
-            "PREVIEW_DIFF_DECAY": "预览差分衰减",
-            "PREVIEW_MOTION_DECAY": "预览运动衰减",
+            "PREVIEW_DENSE_ALPHA": "稠密光流透明度",
+            "PREVIEW_DIFF_DECAY": "差分衰减",
+            "PREVIEW_MOTION_DECAY": "运动衰减",
             "PREVIEW_MOTION_MAX_SPEED": "预览最大速度",
             "ZOOM_DIRECTION_CONSISTENCY": "缩放径向一致性",
             "ZOOM_RADIAL_CORRELATION": "缩放距离相关度",
+            "OPED_DETECTION_ENABLED": "启用OP/ED检测",
+            "OPED_WINDOW_SEC": "匹配窗口秒数",
+            "OPED_MATCH_THRESHOLD": "匹配相关系数",
+            "OPED_HISTORY_HOURS": "历史时长(h)",
+            "OPED_SAMPLE_INTERVAL_SEC": "采样间隔(s)",
         }
 
+        # 参数分组
         groups = [
             ("基本", ["REFRESH_INTERVAL", "SCALE_FACTOR", "SSIM_THRESHOLD", "JingzhiShiJian", "CROP_RATIO", "ALPHA"]),
             ("波形1", ["WAVE_HISTORY_SEC", "WAVE_REFRESH_MS"]),
@@ -1660,10 +1714,12 @@ class AnimeCelCounter:
             ("光流图层分离", ["LAYER_MIN_VALID_POINTS", "LAYER_MIN_MOVING_POINTS",
                               "LAYER_DIRECTION_CONSISTENCY", "LAYER_MEAN_VEC_MIN", "LAYER_COS_SIM_THRESH"]),
             ("缩放运镜", ["ZOOM_DIRECTION_CONSISTENCY", "ZOOM_RADIAL_CORRELATION"]),
-            ("预览参数",
-             ["PREVIEW_DENSE_ALPHA", "PREVIEW_DIFF_DECAY", "PREVIEW_MOTION_DECAY", "PREVIEW_MOTION_MAX_SPEED"]),
+            ("预览参数", ["PREVIEW_DENSE_ALPHA", "PREVIEW_DIFF_DECAY", "PREVIEW_MOTION_DECAY", "PREVIEW_MOTION_MAX_SPEED"]),
+            ("OP/ED检测", ["OPED_DETECTION_ENABLED", "OPED_WINDOW_SEC", "OPED_MATCH_THRESHOLD", "OPED_HISTORY_HOURS",
+                           "OPED_SAMPLE_INTERVAL_SEC"]),
         ]
 
+        # 截图区域比例标签
         self.crop_ratio_label_var = tk.StringVar()
         if CONFIG.get("CROP_REGION"):
             self.crop_ratio_label_var.set("手动区域缩放比例:")
@@ -1676,6 +1732,7 @@ class AnimeCelCounter:
         left_frame.grid(row=0, column=0, sticky="nw", padx=(0, 5))
         right_frame.grid(row=0, column=1, sticky="nw")
 
+        # 生成参数输入框
         for idx, (group_name, keys) in enumerate(groups):
             target = left_frame if idx % 2 == 0 else right_frame
             row = target.grid_size()[1]
@@ -1691,10 +1748,10 @@ class AnimeCelCounter:
                     tk.Label(target, text=label_text, fg=accent, bg=bg,
                              font=("Arial", 9)).grid(row=row, column=0, sticky="w", padx=(0, 2))
                 var = tk.StringVar(value=str(CONFIG[key]))
-                ent = tk.Entry(target, textvariable=var, width=5,     #数值格子长度
+                ent = tk.Entry(target, textvariable=var, width=5,
                                font=("Arial", 9), bg=btn_bg, fg=accent,
                                insertbackground=accent)
-                ent.grid(row=row, column=1, sticky="w", padx=(2, 0))              #创建输入框的行
+                ent.grid(row=row, column=1, sticky="w", padx=(2, 0))
                 entries[key] = var
                 row += 1
 
@@ -1723,12 +1780,12 @@ class AnimeCelCounter:
         def toggle_custom_colors():
             CONFIG["USE_CUSTOM_COLORS"] = self.custom_color_var.get()
             if CONFIG["USE_CUSTOM_COLORS"]:
-                color_frame.grid()  # 重新显示
+                color_frame.grid()
                 for child in color_frame.winfo_children():
                     if isinstance(child, tk.Entry) or isinstance(child, tk.Button):
                         child.configure(state="normal")
             else:
-                color_frame.grid_remove()  # 隐藏
+                color_frame.grid_remove()
             color_manager.apply_theme()
             self._redraw_all()
 
@@ -1741,7 +1798,7 @@ class AnimeCelCounter:
         color_frame = tk.Frame(left_frame, bg=bg)
         color_frame.grid(row=row_left, column=0, columnspan=2, sticky="we", padx=5)
         if not CONFIG["USE_CUSTOM_COLORS"]:
-            color_frame.grid_remove() # 不启用时默认隐藏
+            color_frame.grid_remove()
         row_left += 1
 
         color_keys = [
@@ -1782,9 +1839,6 @@ class AnimeCelCounter:
 
         tk.Button(color_frame, text="恢复默认颜色", command=restore_default_colors,
                   bg=btn_bg, fg=accent).grid(row=row_color, column=0, columnspan=3, pady=5)
-
-        btn_frame = tk.Frame(left_frame, bg=bg)
-        btn_frame.grid(row=row_left, column=0, columnspan=2, pady=10)
 
         # 布局管理（右侧）
         row_right = right_frame.grid_size()[1]
@@ -1860,8 +1914,9 @@ class AnimeCelCounter:
         tk.Button(btn_frame_layout, text="设为当前", command=set_active_layout,
                   bg=btn_bg, fg=accent).pack(side="left", padx=2)
 
-        # 保存/恢复按钮
+        # ---------- 保存 / 恢复默认设置函数 ----------
         def save_settings():
+            """保存当前参数到 CONFIG 并应用"""
             for key, var in entries.items():
                 try:
                     orig = CONFIG[key]
@@ -1907,6 +1962,7 @@ class AnimeCelCounter:
             self._save_all_settings()
 
         def reset_to_default():
+            """恢复所有参数为默认值"""
             CONFIG.clear()
             CONFIG.update(copy.deepcopy(CONFIG_DEFAULT))
             for key, var in entries.items():
@@ -1928,22 +1984,38 @@ class AnimeCelCounter:
             except FileNotFoundError:
                 pass
 
-        tk.Button(btn_frame, text="保存", command=save_settings,
-                  bg=btn_bg, fg=accent).pack(side="left", padx=5)
-        tk.Button(btn_frame, text="恢复默认", command=reset_to_default,
-                  bg=btn_bg, fg=accent).pack(side="left", padx=5)
-        tk.Button(btn_frame, text="说明", command=self.open_readme,
-                  bg=btn_bg, fg=accent).pack(side="left", padx=5)
-        tk.Button(btn_frame, text="显示截图范围", command=self.show_crop_region,
-                  bg=btn_bg, fg=accent).pack(side="left", padx=5)
+        # ---------- 操作按钮（两行） ----------
+        btn_frame = tk.Frame(left_frame, bg=bg)
+        btn_frame.grid(row=row_left, column=0, columnspan=2, pady=10)
 
+        # 第一行：保存、恢复默认、说明
+        row1 = tk.Frame(btn_frame, bg=bg)
+        row1.pack(fill="x", pady=(0, 2))
+        tk.Button(row1, text="保存", command=save_settings,
+                  bg=btn_bg, fg=accent).pack(side="left", padx=3)
+        tk.Button(row1, text="恢复默认", command=reset_to_default,
+                  bg=btn_bg, fg=accent).pack(side="left", padx=3)
+        tk.Button(row1, text="说明", command=self.open_readme,
+                  bg=btn_bg, fg=accent).pack(side="left", padx=3)
+
+        # 第二行：显示截图范围、保存运行记录
+        row2 = tk.Frame(btn_frame, bg=bg)
+        row2.pack(fill="x", pady=(2, 0))
+        tk.Button(row2, text="显示截图范围", command=self.show_crop_region,
+                  bg=btn_bg, fg=accent).pack(side="left", padx=3)
+        tk.Button(row2, text="保存运行记录", command=self._save_record,
+                  bg=btn_bg, fg=accent).pack(side="left", padx=3)
+
+        # 鼠标滚轮绑定
         def on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         canvas.bind_all("<MouseWheel>", on_mousewheel)
 
         return entries
+
     def _pick_color(self, key, var):
+        """颜色选择器回调"""
         from tkinter import colorchooser
         color = colorchooser.askcolor(color=var.get(), title=f"选择{key}颜色")
         if color[1]:
@@ -1951,6 +2023,7 @@ class AnimeCelCounter:
             self.color_vars[key][1].configure(bg=color[1])
 
     def _apply_custom_colors(self):
+        """应用自定义调色板"""
         if CONFIG["USE_CUSTOM_COLORS"]:
             for key, (var, _) in self.color_vars.items():
                 CONFIG["COLORS"][key] = var.get()
@@ -1959,6 +2032,7 @@ class AnimeCelCounter:
         self._redraw_all()
 
     def _redraw_all(self):
+        """重绘所有波形和按钮"""
         self.draw_wave()
         self.draw_wave2()
         if hasattr(self, 'settings_wave_canvas') and self.settings_wave_canvas:
@@ -1966,13 +2040,15 @@ class AnimeCelCounter:
         self._draw_buttons()
 
     def _on_preview_toggle(self, state):
+        """预览开关回调"""
         if state:
             self.preview_manager.start()
         else:
             self.preview_manager.stop()
 
-    # ---------- 捕获循环 ----------
+    # ---------- 屏幕捕获 ----------
     def _get_screen_dxcam(self):
+        """使用 dxcam 获取当前帧的灰度缩小图像"""
         try:
             frame = self.camera.get_latest_frame()
             if frame is None:
@@ -1990,16 +2066,29 @@ class AnimeCelCounter:
             with self.lock:
                 return self.last_frame.copy() if self.last_frame is not None else np.zeros(self.frame_shape, dtype=np.uint8)
 
+    # ---------- 主捕获与检测循环 ----------
     def _capture_loop(self):
+        """
+        主截图与检测循环，运行在独立线程中。
+        核心流程：截帧 -> 灰度/缩放 -> 原始变化检测 -> 基础/完整检测 -> 哈希过滤 -> 计数
+        同时维护 OP/ED 历史波形、每秒采样，并周期性执行 OP/ED 匹配。
+        当匹配到已知 OP/ED 片段时，暂停全局张数与时间统计，仅记录首次出现的片段数据。
+        """
         target_fps = 48
         target_interval = 1.0 / target_fps
         next_frame_time = time.perf_counter()
 
+        # OP/ED 相关局部变量
+        last_oped_detect_time = 0.0          # 上次执行 OP/ED 检测的时间戳
+        oped_sample_interval = CONFIG["OPED_SAMPLE_INTERVAL_SEC"]
+        oped_detect_interval = 5.0           # 每5秒执行一次全量检测，避免频繁滑动窗口
+
         while not self._stop_event.is_set():
-            self._run_event.wait()
+            self._run_event.wait()           # 暂停时阻塞
             if self._stop_event.is_set():
                 break
 
+            # ---------- 帧率控制 ----------
             now = time.perf_counter()
             if now < next_frame_time:
                 sleep_time = next_frame_time - now
@@ -2008,32 +2097,40 @@ class AnimeCelCounter:
                 while time.perf_counter() < next_frame_time:
                     pass
 
+            # 获取当前帧
             now_frame = self._get_screen_dxcam()
             now_ts = time.time()
 
+            # 更新帧率目标
             if time.perf_counter() > next_frame_time + target_interval:
                 next_frame_time = time.perf_counter() + target_interval
             else:
                 next_frame_time += target_interval
 
+            # 获取上一帧（线程安全）
             with self.lock:
                 last = self.last_frame.copy() if self.last_frame is not None else None
 
             new_cel = 0
             raw_new_cel = 0
+            move_type = "静止"
 
             if last is not None:
+                # 原始变化检测
                 raw_detected = is_raw_change(last, now_frame)
                 raw_new_cel = 1 if raw_detected else 0
 
+                # 基础检测（始终执行）
                 basic_detected, move_type = basic_is_new_cel(last, now_frame)
                 if basic_detected:
                     self.raw_detection_timestamps.append(now_ts)
 
+                # 动态过滤窗口维护
                 window_sec = CONFIG["FILTER_TRIGGER_WINDOW_MS"] / 1000.0
                 while self.raw_detection_timestamps and self.raw_detection_timestamps[0] < now_ts - window_sec:
                     self.raw_detection_timestamps.popleft()
 
+                # 决定是否启用完整检测
                 if len(self.raw_detection_timestamps) >= CONFIG["FILTER_TRIGGER_COUNT"]:
                     if not self.full_filter_active:
                         self.full_filter_active = True
@@ -2041,11 +2138,13 @@ class AnimeCelCounter:
                 elif self.full_filter_active and now_ts > self.full_filter_active_until:
                     self.full_filter_active = False
 
+                # 最终检测：基础或完整
                 if self.full_filter_active:
                     final_detected, move_type = full_is_new_cel(last, now_frame, self.use_optical_flow)
                 else:
                     final_detected = basic_detected
 
+                # 哈希重复帧过滤
                 curr_hash = None
                 if self.use_hash_filter:
                     curr_hash = compute_hash(now_frame)
@@ -2063,6 +2162,7 @@ class AnimeCelCounter:
                 else:
                     new_cel = 1 if final_detected else 0
 
+                # 过滤类型统计（仅当原始检测到但最终未计数时）
                 if raw_new_cel == 1 and new_cel == 0:
                     if duplicate and final_detected:
                         self.total_hash_filtered += 1
@@ -2080,23 +2180,43 @@ class AnimeCelCounter:
                         else:
                             self.total_other_unknown_filtered += 1
 
+                # 更新哈希缓冲区
                 if self.use_hash_filter:
                     with self.lock:
                         self.frame_buffer.append(curr_hash)
             else:
+                # 首帧：直接记录哈希
                 if self.use_hash_filter:
                     with self.lock:
                         self.frame_buffer.append(compute_hash(now_frame))
 
-            if new_cel:
-                with self.lock:
-                    self.total_cels_count += 1
-                if not self._has_first_frame:
-                    self._has_first_frame = True
-            if raw_new_cel:
-                with self.lock:
-                    self.total_raw_cels_count += 1
+            # ---------- 跳过区间判断与计数 ----------
+            skip = False
+            skip_until = self.skip_until_abs_time
+            if skip_until > 0 and now_ts < skip_until:
+                skip = True
+            else:
+                if skip_until > 0 and self.oped_active_segment is not None:
+                    self._finalize_oped_counting()
 
+            if new_cel:
+                if not skip:
+                    # 正常计数（正片）
+                    with self.lock:
+                        self.total_cels_count += 1
+                    if not self._has_first_frame:
+                        self._has_first_frame = True
+                else:
+                    # 正处于 OP/ED 区间，将张数记录到当前活动片段的临时统计中
+                    if self.oped_active_segment is not None:
+                        self.oped_active_segment['cel_count'] += 1
+
+            if raw_new_cel:
+                if not skip:
+                    with self.lock:
+                        self.total_raw_cels_count += 1
+
+            # 更新上一帧
             with self.lock:
                 self.last_frame = now_frame
                 if not self._has_first_frame:
@@ -2105,6 +2225,7 @@ class AnimeCelCounter:
             # 更新预览缓存
             self.preview_cache = (last, now_frame.copy() if now_frame is not None else None)
 
+            # 实时张数滑动窗口更新
             self.recent_frames.append((now_ts, new_cel))
             self.recent_sum += new_cel
             while self.recent_frames and now_ts - self.recent_frames[0][0] > 1.0:
@@ -2127,13 +2248,40 @@ class AnimeCelCounter:
                 self.current_raw_cels = cels_raw
                 self.last_move_type = move_type if last is not None else "静止"
 
+            # OP/ED 历史采样（每秒一次）
+            if self.oped_enabled and now_ts - self.oped_last_sample_time >= oped_sample_interval:
+                with self.lock:
+                    fc = self.current_cels
+                    rc = self.current_raw_cels
+                self.oped_history_time.append(now_ts)
+                self.oped_history_filtered.append(fc)
+                self.oped_history_raw.append(rc)
+
+                max_points = int(CONFIG["OPED_HISTORY_HOURS"] * 3600 / oped_sample_interval)
+                while len(self.oped_history_time) > max_points:
+                    self.oped_history_time.popleft()
+                    self.oped_history_filtered.popleft()
+                    self.oped_history_raw.popleft()
+                self.oped_last_sample_time = now_ts
+
+            # OP/ED 检测（每5秒一次）
+            if self.oped_enabled and now_ts - last_oped_detect_time >= oped_detect_interval:
+                self._detect_oped()
+                last_oped_detect_time = now_ts
+
     # ---------- UI 更新与波形 ----------
     def loop(self):
+        """主 UI 更新循环"""
         if self.is_running:
             now_real = time.time()
-            self.elapsed_time += now_real - self.last_loop_time
+            # 跳过区间内不累加运行时长
+            if self.skip_until_abs_time == 0 or self.elapsed_time >= self.skip_until_abs_time:
+                self.elapsed_time += now_real - self.last_loop_time
+                if self.skip_until_abs_time > 0:
+                    self._finalize_oped_counting()
             self.last_loop_time = now_real
 
+            # 每秒记录一次历史数据
             if not hasattr(self, '_last_recorded_time'):
                 self._last_recorded_time = -1
             if self.elapsed_time - self._last_recorded_time >= 1.0:
@@ -2155,6 +2303,8 @@ class AnimeCelCounter:
             with self.lock:
                 current_total = self.total_cels_count
                 has_frame = self._has_first_frame
+
+            # 静止自动暂停检测
             if has_frame:
                 if current_total != self._prev_cels_count:
                     self.idle_start_time = None
@@ -2168,6 +2318,7 @@ class AnimeCelCounter:
                 self.lb_total_cels.config(text=f"总张数：{current_total}")
                 self._last_disp_cels = current_total
 
+            # 刷新界面标签
             if now_real - self.last_refresh >= CONFIG["REFRESH_INTERVAL"]:
                 with self.lock:
                     real = self.current_cels
@@ -2188,6 +2339,7 @@ class AnimeCelCounter:
         self.root.after(20, self.loop)
 
     def pause(self):
+        """暂停/继续"""
         self.is_running = not self.is_running
         if self.is_running:
             self._run_event.set()
@@ -2204,6 +2356,7 @@ class AnimeCelCounter:
         self._draw_buttons()
 
     def reset_stats(self):
+        """重置所有统计数据"""
         was_running = self.is_running
         if was_running:
             self._run_event.clear()
@@ -2252,6 +2405,20 @@ class AnimeCelCounter:
         self.total_local_filtered = 0
         self.total_other_unknown_filtered = 0
         self.total_zoom_filtered = 0
+
+        # 清理 OP/ED 检测数据
+        self.oped_history_time.clear()
+        self.oped_history_filtered.clear()
+        self.oped_history_raw.clear()
+        self.oped_last_sample_time = 0.0
+        self.known_segments.clear()
+        self.segment_occurrences.clear()
+        self.skip_until_abs_time = 0.0
+        self.oped_active_segment = None
+        self.oped_unique_cels = 0
+        self.oped_unique_time = 0.0
+        self.oped_unique_count = 0
+
         accent = color_manager.get_color('accent')
         self.lb_rt.config(text="实时张数：0.0 ")
         self.lb_total_time.config(text="运行时长：0.0 s")
@@ -2271,12 +2438,14 @@ class AnimeCelCounter:
             self.camera.start(target_fps=0, video_mode=False)
 
     def _on_close(self):
+        """关闭程序"""
         self._stop_event.set()
         self._run_event.set()
         self.preview_manager.stop()
         self.root.destroy()
 
     def get_status(self, v):
+        """根据当前张数返回状态描述"""
         if self.full_filter_active:
             base = "完整 "
         else:
@@ -2288,7 +2457,6 @@ class AnimeCelCounter:
             return base + "平移运镜"
         elif mt == "图层分离运镜":
             return base + "多层平移"
-
         elif mt == "局部变化(过滤)":
             return base + "局部变化"
         elif mt == "静止":
@@ -2319,6 +2487,7 @@ class AnimeCelCounter:
                 return base + "高频作画"
 
     def update_wave(self):
+        """更新波形1数据"""
         if self.is_running:
             with self.lock:
                 cels = self.current_cels
@@ -2329,6 +2498,7 @@ class AnimeCelCounter:
         self.root.after(CONFIG["WAVE_REFRESH_MS"], self.update_wave)
 
     def update_wave2(self):
+        """更新波形2数据（长周期平滑）"""
         if self.is_running:
             with self.lock:
                 raw = self.current_cels
@@ -2341,17 +2511,18 @@ class AnimeCelCounter:
         self.root.after(CONFIG["WAVE2_REFRESH_MS"], self.update_wave2)
 
     def draw_wave(self):
+        """绘制波形1（60秒）"""
         color_filtered = color_manager.get_color('wave_line_filtered')
         color_raw = color_manager.get_color('wave_line_raw')
         data_list = [
             (self.wave_raw_data, color_raw),
             (self.wave_data, color_filtered)
-
         ]
         self._draw_wave_multi(self.canvas, data_list,
                               CONFIG["WAVE_HISTORY_SEC"], CONFIG["WAVE_MAX_Y"], "60s")
 
     def draw_wave2(self):
+        """绘制波形2（25分钟）"""
         color_filtered = color_manager.get_color('wave_line_filtered')
         color_raw = color_manager.get_color('wave_line_raw')
         data_list = [
@@ -2360,7 +2531,9 @@ class AnimeCelCounter:
         ]
         self._draw_wave_multi(self.canvas2, data_list,
                               CONFIG["WAVE2_HISTORY_SEC"], CONFIG["WAVE_MAX_Y"], "25min")
+
     def _draw_wave_multi(self, canvas, data_list, history_sec, y_max, title=""):
+        """通用波形绘制，支持多条数据线及OP/ED高亮"""
         canvas.delete("all")
         width = canvas.winfo_width()
         height = canvas.winfo_height()
@@ -2378,6 +2551,20 @@ class AnimeCelCounter:
         if title:
             canvas.create_text(self.wave_margin_left, self.wave_margin_top - 5,
                                text=title, fill=accent, font=("Arial", 8), anchor="nw")
+
+        # 绘制 OP/ED 背景高亮
+        if self.oped_enabled:
+            mark_color = "#FFD700"
+            now = self.elapsed_time
+            start_t = now - history_sec
+            for s, e, sid in self.segment_occurrences:
+                if e >= start_t and s <= now:
+                    x1 = self.wave_margin_left + plot_w * (max(s, start_t) - start_t) / history_sec
+                    x2 = self.wave_margin_left + plot_w * (min(e, now) - start_t) / history_sec
+                    canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
+                                            fill=mark_color, outline="", stipple="gray25")
+
+        # 绘制数据线
         for wave_data, color in data_list:
             points = [(t, v) for t, v in wave_data if start <= t <= now]
             if not points:
@@ -2396,6 +2583,7 @@ class AnimeCelCounter:
                 canvas.create_line(line_pts, fill=color, width=1, smooth=False)
 
     def _draw_axes_only(self, canvas, plot_w, plot_h, y_max, accent):
+        """绘制坐标轴"""
         canvas.create_line(self.wave_margin_left, self.wave_margin_top,
                            self.wave_margin_left, self.wave_margin_top + plot_h, fill=accent)
         for y_val in [0, 6, 12, 18, 24]:
@@ -2406,7 +2594,112 @@ class AnimeCelCounter:
             canvas.create_text(self.wave_margin_left - 8, y, text=str(y_val), fill=accent,
                                font=("Arial", 8), anchor="e")
 
+    # ---------- OP/ED 检测核心 ----------
+    def _detect_oped(self):
+        """检测当前窗口是否与历史片段或已知OP/ED匹配"""
+        if not self.oped_enabled or len(self.oped_history_time) < 3:
+            return
+
+        win_len = CONFIG["OPED_WINDOW_SEC"]
+        sample_interval = CONFIG["OPED_SAMPLE_INTERVAL_SEC"]
+        win_points = int(win_len / sample_interval)
+        if len(self.oped_history_time) < win_points:
+            return
+
+        t = list(self.oped_history_time)
+        f = list(self.oped_history_filtered)
+        r = list(self.oped_history_raw)
+
+        curr_f = np.array(f[-win_points:], dtype=np.float32)
+        curr_r = np.array(r[-win_points:], dtype=np.float32)
+        curr_start_time = t[-win_points]
+
+        # 1. 与已知片段匹配
+        for seg in self.known_segments:
+            tpl_f = np.array(seg['template_filtered'])
+            tpl_r = np.array(seg['template_raw'])
+            if len(tpl_f) != win_points:
+                continue
+            corr_f = np.corrcoef(curr_f, tpl_f)[0, 1] if np.std(curr_f) > 1e-6 and np.std(tpl_f) > 1e-6 else 0
+            corr_r = np.corrcoef(curr_r, tpl_r)[0, 1] if np.std(curr_r) > 1e-6 and np.std(tpl_r) > 1e-6 else 0
+            if corr_f > CONFIG["OPED_MATCH_THRESHOLD"] and corr_r > CONFIG["OPED_MATCH_THRESHOLD"]:
+                self._mark_skip_region(seg, curr_start_time, win_len)
+                return
+
+        # 2. 在全部历史中滑动搜索
+        best_corr_f = 0
+        best_corr_r = 0
+        best_start_idx = -1
+        for i in range(len(t) - 2 * win_points):
+            hist_f = np.array(f[i:i + win_points], dtype=np.float32)
+            hist_r = np.array(r[i:i + win_points], dtype=np.float32)
+            cf = np.corrcoef(curr_f, hist_f)[0, 1] if np.std(curr_f) > 1e-6 and np.std(hist_f) > 1e-6 else 0
+            cr = np.corrcoef(curr_r, hist_r)[0, 1] if np.std(curr_r) > 1e-6 and np.std(hist_r) > 1e-6 else 0
+            if cf > best_corr_f and cr > best_corr_r:
+                best_corr_f = cf
+                best_corr_r = cr
+                best_start_idx = i
+
+        if best_corr_f > CONFIG["OPED_MATCH_THRESHOLD"] and best_corr_r > CONFIG["OPED_MATCH_THRESHOLD"]:
+            new_seg = {
+                'template_filtered': f[best_start_idx:best_start_idx + win_points],
+                'template_raw': r[best_start_idx:best_start_idx + win_points],
+                'first_time': t[best_start_idx],
+                'count': 1,
+                'cel_count': 0,
+                'is_counted': False
+            }
+            self.known_segments.append(new_seg)
+            self._mark_skip_region(new_seg, curr_start_time, win_len)
+
+    def _mark_skip_region(self, segment, start_time, window_len):
+        """标记OP/ED区间，暂停统计"""
+        end_time = start_time + window_len
+        self.skip_until_abs_time = end_time
+        self.oped_active_segment = segment
+        self.segment_occurrences.append((start_time, end_time, id(segment)))
+        segment['count'] += 1
+
+    def _finalize_oped_counting(self):
+        """OP/ED区间结束，若首次出现则计入不重复统计"""
+        if self.oped_active_segment and not self.oped_active_segment.get('is_counted', False):
+            seg = self.oped_active_segment
+            self.oped_unique_cels += seg.get('cel_count', 0)
+            self.oped_unique_time += CONFIG["OPED_WINDOW_SEC"]
+            self.oped_unique_count += 1
+            seg['is_counted'] = True
+        self.oped_active_segment = None
+        self.skip_until_abs_time = 0.0
+
+    def _save_record(self):
+        """保存当前运行记录到 JSON 文件"""
+        import tkinter.simpledialog as sd
+        name = sd.askstring("保存记录", "输入记录名称：")
+        if not name:
+            return
+        record = {
+            "name": name,
+            "total_cels": self.total_cels_count + self.oped_unique_cels,
+            "total_time": self.elapsed_time,
+            "avg_fps": (self.total_cels_count + self.oped_unique_cels) / self.elapsed_time if self.elapsed_time > 0 else 0,
+            "oped_unique_cels": self.oped_unique_cels,
+            "oped_unique_time": self.oped_unique_time,
+            "record_time": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        path = os.path.join(os.path.expanduser("~"), "cel_counter_records.json")
+        try:
+            with open(path, "r") as f:
+                records = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            records = []
+        records.append(record)
+        with open(path, "w") as f:
+            json.dump(records, f, indent=2)
+        import tkinter.messagebox as mb
+        mb.showinfo("保存成功", f"记录已保存至 {path}")
+
     def _draw_settings_wave(self):
+        """绘制设置界面中的总张数波形（过滤前后及各类过滤数量）"""
         if not hasattr(self, 'settings_wave_canvas') or self.settings_wave_canvas is None:
             return
         canvas = self.settings_wave_canvas
