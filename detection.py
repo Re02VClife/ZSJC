@@ -64,6 +64,9 @@ def basic_is_new_cel(prev, curr):
         raw_diff = cv2.absdiff(prev, curr)
         raw_thresh = adaptive_threshold(curr)
         _, raw_mask = cv2.threshold(raw_diff, raw_thresh, 255, cv2.THRESH_BINARY)
+        # --- 插入闭运算 ---
+        kernel = np.ones((3, 3), np.uint8)
+        raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
         raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
         if raw_ratio < CONFIG["BASIC_MIN_RAW_RATIO_STILL"]:
             return False, "极慢平移/静止"

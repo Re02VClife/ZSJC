@@ -104,6 +104,8 @@ def create_settings_window(parent, counter):
     title_bg = color_manager.get_color('title_bg')
     btn_bg = color_manager.get_color('btn_bg')
 
+
+
     title_bar = tk.Frame(win, bg=title_bg, height=30, cursor="fleur")
     title_bar.pack(fill=tk.X)
     title_label = tk.Label(title_bar, text="参数设置", bg=title_bg, fg=accent,

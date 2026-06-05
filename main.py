@@ -45,7 +45,8 @@ class AnimeCelCounter:
         self._stop_event = threading.Event()
         self._run_event = threading.Event()
         self._run_event.set()
-
+        self.time_lock = threading.Lock()  # 新增
+        self.skip_until_elapsed = 0.0  # 新增，替代原 skip_until_abs_time
         # ---------- 实时统计相关 ----------
         self.recent_frames = deque()
         self.recent_sum = 0
@@ -88,6 +89,7 @@ class AnimeCelCounter:
         self.total_local_filtered = 0
         self.total_other_unknown_filtered = 0
         self.total_zoom_filtered = 0
+        self.color_vars = {}
         self.load_settings()
 
         # ---------- OP/ED 检测 ----------
@@ -96,7 +98,28 @@ class AnimeCelCounter:
         self.oped_history_filtered = deque()  # 每秒过滤后张数
         self.oped_history_raw = deque()       # 每秒过滤前张数
         self.oped_last_sample_time = 0.0
+        # 连续匹配状态
+        self.consecutive_match_start = None
 
+        # 连续匹配判定
+        self.oped_match_count = 0  # 连续匹配次数
+        self.oped_mismatch_count = 0  # 连续未匹配次数
+        self.oped_match_active = False  # 当前是否处于匹配状态
+        self.oped_match_start = None  # 当前匹配区间起点（elapsed_time）
+        self.oped_pending_id = None  # 当前匹配区间临时分配的类别ID
+
+        # 片段特征模板
+        self.oped_templates = []  # 每条模板：[wave, color, id]
+        self.oped_color_palette = ['#FFD700', '#87CEEB', '#90EE90', '#FFB6C1', '#DDA0DD']  # 淡金、淡蓝、淡绿、淡粉、淡紫
+        self.oped_next_color_idx = 0
+
+        # 匹配进入/退出阈值
+        self.OPED_ENTER_COUNT = 1  # 连续匹配a次确认为OP/ED区间开始  设置1直接退出
+        self.OPED_EXIT_COUNT = 1  # 同上，结束区间
+        # OP/ED 累计扣除数据
+        self.oped_deducted_cels = 0
+        self.oped_deducted_time = 0.0
+        self.deducted_intervals = []  # 已扣除的区间 [(start, end), ...]
         # 已知 OP/ED 片段模板
         self.known_segments = []              # 每个元素为 dict
         self.segment_occurrences = []         # (start_time, end_time, segment_id)
@@ -107,7 +130,6 @@ class AnimeCelCounter:
         self.oped_unique_cels = 0             # 不重复 OP/ED 总张数
         self.oped_unique_time = 0.0           # 不重复 OP/ED 总时长
         self.oped_unique_count = 0            # 不重复片段个数
-        self.skip_until_abs_time = 0.0        # 绝对跳过截止时间戳
         self.oped_active_segment = None       # 当前正在跳过的 OP/ED 片段引用
 
         # ---------- 哈希缓冲区 ----------
@@ -208,16 +230,14 @@ class AnimeCelCounter:
         return (int(new_left), int(new_top), int(new_right), int(new_bottom))
 
     def _get_settings_path(self):
-        """获取配置文件路径"""
-        if getattr(sys, 'frozen', False):
-            return os.path.join(os.path.expanduser("~"), "cel_counter_settings.json")
-        return "cel_counter_settings.json"
+        from config import get_settings_path
+        return get_settings_path()
 
     def load_settings(self):
         """从 JSON 加载设置"""
         try:
             settings_path = self._get_settings_path()
-            with open(settings_path, "r") as f:
+            with open(settings_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             CONFIG.update(data.get("config", {}))
             self.use_optical_flow = data.get("use_optical_flow", True)
@@ -245,8 +265,8 @@ class AnimeCelCounter:
             "active_layout": self.active_layout
         }
         path = self._get_settings_path()
-        with open(path, "w") as f:
-            json.dump(settings, f, indent=2)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2, ensure_ascii=False)
 
     def make_draggable(self):
         """使主窗口可拖动（无边框窗口）"""
@@ -666,7 +686,115 @@ class AnimeCelCounter:
                   bg=btn_bg, fg=accent).pack(side="left", padx=2)
         tk.Button(btn_frame_layout, text="设为当前", command=set_active_layout,
                   bg=btn_bg, fg=accent).pack(side="left", padx=2)
+        # ---------- 运行记录管理 ----------
+        # 添加在布局管理下方
+        tk.Label(right_frame, text="运行记录管理", font=("Arial", 10, "bold"),
+                 fg=accent, bg=bg).grid(row=row_right, column=0, columnspan=2, sticky="w", pady=(10, 2))
+        row_right += 1
 
+        record_listbox = tk.Listbox(right_frame, bg=btn_bg, fg=accent, height=6, selectmode=tk.SINGLE)
+        record_listbox.grid(row=row_right, column=0, columnspan=2, sticky="we", padx=5)
+        row_right += 1
+
+        btn_frame_records = tk.Frame(right_frame, bg=bg)
+        btn_frame_records.grid(row=row_right, column=0, columnspan=2, pady=5)
+        row_right += 1
+
+        def load_record_list():
+            record_listbox.delete(0, tk.END)
+            records = self.load_records()
+            for i, rec in enumerate(records):
+                display = f"{rec['name']}  |  {rec.get('record_time', '')}"
+                record_listbox.insert(tk.END, display)
+
+        def view_record():
+            sel = record_listbox.curselection()
+            if not sel:
+                return
+            records = self.load_records()
+            idx = sel[0]
+            if idx >= len(records):
+                return
+            rec = records[idx]
+            info = (f"名称: {rec['name']}\n"
+                    f"总张数: {rec.get('total_cels', 'N/A')}\n"
+                    f"总时长: {rec.get('total_time', 'N/A')} 秒\n"
+                    f"平均帧率: {rec.get('avg_fps', 'N/A'):.2f}\n"
+                    f"记录时间: {rec.get('record_time', 'N/A')}")
+            import tkinter.messagebox as messagebox
+            messagebox.showinfo("记录详情", info)
+
+        def edit_record():
+            sel = record_listbox.curselection()
+            if not sel:
+                return
+            records = self.load_records()
+            idx = sel[0]
+            if idx >= len(records):
+                return
+            rec = records[idx]
+            # 编辑对话框
+            edit_win = tk.Toplevel(win)
+            edit_win.title("编辑记录")
+            edit_win.configure(bg=bg)
+            tk.Label(edit_win, text="名称:", fg=accent, bg=bg).grid(row=0, column=0, padx=5, pady=5)
+            name_var = tk.StringVar(value=rec['name'])
+            tk.Entry(edit_win, textvariable=name_var, bg=btn_bg, fg=accent).grid(row=0, column=1, padx=5, pady=5)
+
+            tk.Label(edit_win, text="总张数:", fg=accent, bg=bg).grid(row=1, column=0, padx=5, pady=5)
+            cels_var = tk.StringVar(value=str(rec.get('total_cels', 0)))
+            tk.Entry(edit_win, textvariable=cels_var, bg=btn_bg, fg=accent).grid(row=1, column=1, padx=5, pady=5)
+
+            tk.Label(edit_win, text="总时长(s):", fg=accent, bg=bg).grid(row=2, column=0, padx=5, pady=5)
+            time_var = tk.StringVar(value=str(rec.get('total_time', 0)))
+            tk.Entry(edit_win, textvariable=time_var, bg=btn_bg, fg=accent).grid(row=2, column=1, padx=5, pady=5)
+
+            def save_changes():
+                try:
+                    new_name = name_var.get().strip()
+                    new_cels = int(float(cels_var.get()))
+                    new_time = float(time_var.get())
+                    if not new_name:
+                        return
+                    records[idx]['name'] = new_name
+                    records[idx]['total_cels'] = new_cels
+                    records[idx]['total_time'] = new_time
+                    records[idx]['avg_fps'] = new_cels / new_time if new_time > 0 else 0
+                    self.save_records(records)
+                    load_record_list()
+                    edit_win.destroy()
+                except ValueError:
+                    import tkinter.messagebox as messagebox
+                    messagebox.showerror("输入错误", "请输入有效的数字")
+
+            tk.Button(edit_win, text="保存", command=save_changes,
+                      bg=btn_bg, fg=accent).grid(row=3, column=0, columnspan=2, pady=10)
+            edit_win.transient(win)
+            edit_win.grab_set()
+
+        def delete_record():
+            sel = record_listbox.curselection()
+            if not sel:
+                return
+            records = self.load_records()
+            idx = sel[0]
+            if idx >= len(records):
+                return
+            import tkinter.messagebox as messagebox
+            if messagebox.askyesno("确认删除", "确定删除该记录吗？"):
+                self.delete_record(idx)
+                load_record_list()
+
+        tk.Button(btn_frame_records, text="查看", command=view_record,
+                  bg=btn_bg, fg=accent).pack(side="left", padx=2)
+        tk.Button(btn_frame_records, text="编辑", command=edit_record,
+                  bg=btn_bg, fg=accent).pack(side="left", padx=2)
+        tk.Button(btn_frame_records, text="删除", command=delete_record,
+                  bg=btn_bg, fg=accent).pack(side="left", padx=2)
+        tk.Button(btn_frame_records, text="刷新", command=load_record_list,
+                  bg=btn_bg, fg=accent).pack(side="left", padx=2)
+
+        load_record_list()  # 初始加载
         # ---------- 保存 / 恢复默认设置函数 ----------
         def save_settings():
             """保存当前参数到 CONFIG 并应用"""
@@ -737,12 +865,18 @@ class AnimeCelCounter:
             except FileNotFoundError:
                 pass
 
-        # ---------- 操作按钮（两行） ----------
-        btn_frame = tk.Frame(left_frame, bg=bg)
-        btn_frame.grid(row=row_left, column=0, columnspan=2, pady=10)
 
-        # 第一行：保存、恢复默认、说明
-        row1 = tk.Frame(btn_frame, bg=bg)
+        # 鼠标滚轮绑定
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+        # ========== 顶部固定按钮栏（创建于所有函数定义之后） ==========
+        top_btn_frame = tk.Frame(parent, bg=bg)
+        # 使用 before 参数，让这个 frame 显示在 canvas 之前（即上方）
+        top_btn_frame.pack(side="top", fill="x", before=canvas, pady=(5, 0), padx=5)
+
+        row1 = tk.Frame(top_btn_frame, bg=bg)
         row1.pack(fill="x", pady=(0, 2))
         tk.Button(row1, text="保存", command=save_settings,
                   bg=btn_bg, fg=accent).pack(side="left", padx=3)
@@ -751,21 +885,39 @@ class AnimeCelCounter:
         tk.Button(row1, text="说明", command=self.open_readme,
                   bg=btn_bg, fg=accent).pack(side="left", padx=3)
 
-        # 第二行：显示截图范围、保存运行记录
-        row2 = tk.Frame(btn_frame, bg=bg)
-        row2.pack(fill="x", pady=(2, 0))
+        row2 = tk.Frame(top_btn_frame, bg=bg)
+        row2.pack(fill="x", pady=(2, 5))
         tk.Button(row2, text="显示截图范围", command=self.show_crop_region,
                   bg=btn_bg, fg=accent).pack(side="left", padx=3)
         tk.Button(row2, text="保存运行记录", command=self._save_record,
                   bg=btn_bg, fg=accent).pack(side="left", padx=3)
 
-        # 鼠标滚轮绑定
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        canvas.bind_all("<MouseWheel>", on_mousewheel)
 
         return entries
+
+    # ---------- 运行记录管理方法 ----------
+    def _get_records_path(self):
+        settings_dir = os.path.dirname(self._get_settings_path())
+        return os.path.join(settings_dir, "cel_counter_records.json")
+
+    def load_records(self):
+        path = self._get_records_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+
+    def save_records(self, records):
+        path = self._get_records_path()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(records, f, indent=2, ensure_ascii=False)
+
+    def delete_record(self, index):
+        records = self.load_records()
+        if 0 <= index < len(records):
+            del records[index]
+            self.save_records(records)
 
     def _pick_color(self, key, var):
         """颜色选择器回调"""
@@ -803,6 +955,7 @@ class AnimeCelCounter:
     def _get_screen_dxcam(self):
         """使用 dxcam 获取当前帧的灰度缩小图像"""
         try:
+
             frame = self.camera.get_latest_frame()
             if frame is None:
                 with self.lock:
@@ -834,7 +987,7 @@ class AnimeCelCounter:
         # OP/ED 相关局部变量
         last_oped_detect_time = 0.0          # 上次执行 OP/ED 检测的时间戳
         oped_sample_interval = CONFIG["OPED_SAMPLE_INTERVAL_SEC"]
-        oped_detect_interval = 5.0           # 每5秒执行一次全量检测，避免频繁滑动窗口
+        oped_detect_interval = 2.0           # 每2秒执行一次全量检测，避免频繁滑动窗口
 
         while not self._stop_event.is_set():
             self._run_event.wait()           # 暂停时阻塞
@@ -943,31 +1096,15 @@ class AnimeCelCounter:
                     with self.lock:
                         self.frame_buffer.append(compute_hash(now_frame))
 
-            # ---------- 跳过区间判断与计数 ----------
-            skip = False
-            skip_until = self.skip_until_abs_time
-            if skip_until > 0 and now_ts < skip_until:
-                skip = True
-            else:
-                if skip_until > 0 and self.oped_active_segment is not None:
-                    self._finalize_oped_counting()
-
             if new_cel:
-                if not skip:
-                    # 正常计数（正片）
-                    with self.lock:
-                        self.total_cels_count += 1
-                    if not self._has_first_frame:
-                        self._has_first_frame = True
-                else:
-                    # 正处于 OP/ED 区间，将张数记录到当前活动片段的临时统计中
-                    if self.oped_active_segment is not None:
-                        self.oped_active_segment['cel_count'] += 1
+                self.total_cels_count += 1
+                if not self._has_first_frame:
+                    self._has_first_frame = True
 
             if raw_new_cel:
-                if not skip:
-                    with self.lock:
-                        self.total_raw_cels_count += 1
+                self.total_raw_cels_count += 1
+
+
 
             # 更新上一帧
             with self.lock:
@@ -1006,7 +1143,7 @@ class AnimeCelCounter:
                 with self.lock:
                     fc = self.current_cels
                     rc = self.current_raw_cels
-                self.oped_history_time.append(now_ts)
+                self.oped_history_time.append(self.elapsed_time)  # 改为运行时长
                 self.oped_history_filtered.append(fc)
                 self.oped_history_raw.append(rc)
 
@@ -1015,7 +1152,9 @@ class AnimeCelCounter:
                     self.oped_history_time.popleft()
                     self.oped_history_filtered.popleft()
                     self.oped_history_raw.popleft()
-                self.oped_last_sample_time = now_ts
+                self.oped_last_sample_time = now_ts  # 采样间隔控制仍用绝对时间
+
+
 
             # OP/ED 检测（每5秒一次）
             if self.oped_enabled and now_ts - last_oped_detect_time >= oped_detect_interval:
@@ -1027,11 +1166,8 @@ class AnimeCelCounter:
         """主 UI 更新循环"""
         if self.is_running:
             now_real = time.time()
-            # 跳过区间内不累加运行时长
-            if self.skip_until_abs_time == 0 or self.elapsed_time >= self.skip_until_abs_time:
-                self.elapsed_time += now_real - self.last_loop_time
-                if self.skip_until_abs_time > 0:
-                    self._finalize_oped_counting()
+
+            self.elapsed_time += now_real - self.last_loop_time
             self.last_loop_time = now_real
 
             # 每秒记录一次历史数据
@@ -1057,19 +1193,21 @@ class AnimeCelCounter:
                 current_total = self.total_cels_count
                 has_frame = self._has_first_frame
 
+            net_cels = current_total - self.oped_deducted_cels
+
             # 静止自动暂停检测
             if has_frame:
-                if current_total != self._prev_cels_count:
+                if net_cels != self._prev_cels_count:
                     self.idle_start_time = None
                 elif self.idle_start_time is None:
                     self.idle_start_time = self.elapsed_time
                 elif self.elapsed_time - self.idle_start_time >= CONFIG["JingzhiShiJian"]:
                     self.pause()
-            self._prev_cels_count = current_total
+            self._prev_cels_count = net_cels
 
-            if current_total != self._last_disp_cels:
-                self.lb_total_cels.config(text=f"总张数：{current_total}")
-                self._last_disp_cels = current_total
+            if net_cels != self._last_disp_cels:
+                self.lb_total_cels.config(text=f"总张数：{net_cels}")
+                self._last_disp_cels = net_cels
 
             # 刷新界面标签
             if now_real - self.last_refresh >= CONFIG["REFRESH_INTERVAL"]:
@@ -1079,11 +1217,15 @@ class AnimeCelCounter:
                 self.total_count += 1
                 avg = self.total_sum / self.total_count if self.total_count > 0 else 0.0
 
+                net_cels = current_total - self.oped_deducted_cels
+                net_time = self.elapsed_time - self.oped_deducted_time
+                avg_net = net_cels / net_time if net_time > 0 else 0.0
+
                 accent = color_manager.get_color('accent')
                 self.lb_rt.config(text=f"实时张数：{real:.1f} ", fg=accent)
-                self.lb_total_time.config(text=f"运行时长：{self.elapsed_time:.1f} s", fg=accent)
-                self.lb_total_cels.config(text=f"总张数：{current_total}", fg=accent)
-                self.lb_avg.config(text=f"总平均：{avg:.1f}", fg=accent)
+                self.lb_total_time.config(text=f"运行时长：{net_time:.1f} s", fg=accent)
+                self.lb_total_cels.config(text=f"总张数：{net_cels}", fg=accent)
+                self.lb_avg.config(text=f"总平均：{avg_net:.1f}", fg=accent)
                 status = self.get_status(real)
                 self.lb_st.config(text=status, fg=accent)
                 self.last_refresh = now_real
@@ -1166,12 +1308,18 @@ class AnimeCelCounter:
         self.oped_last_sample_time = 0.0
         self.known_segments.clear()
         self.segment_occurrences.clear()
-        self.skip_until_abs_time = 0.0
+        with self.time_lock:
+            self.skip_until_elapsed = 0.0
         self.oped_active_segment = None
         self.oped_unique_cels = 0
         self.oped_unique_time = 0.0
         self.oped_unique_count = 0
-
+        self.consecutive_match_start = None
+        self.oped_deducted_cels = 0
+        self.oped_deducted_time = 0.0
+        self.deducted_intervals.clear()
+        self.segment_occurrences.clear()
+        self.known_segments.clear()
         accent = color_manager.get_color('accent')
         self.lb_rt.config(text="实时张数：0.0 ")
         self.lb_total_time.config(text="运行时长：0.0 s")
@@ -1180,7 +1328,14 @@ class AnimeCelCounter:
         self.lb_st.config(text="静止/纯运镜")
         self.draw_wave()
         self.draw_wave2()
-
+        # 重置连续匹配状态
+        self.oped_match_count = 0
+        self.oped_mismatch_count = 0
+        self.oped_match_active = False
+        self.oped_match_start = None
+        self.oped_pending_id = None
+        self.oped_templates.clear()
+        self.oped_next_color_idx = 0
         if was_running:
             self._run_event.set()
             try:
@@ -1308,14 +1463,31 @@ class AnimeCelCounter:
         # 绘制 OP/ED 背景高亮
         if self.oped_enabled:
             mark_color = "#FFD700"
-            now = self.elapsed_time
             start_t = now - history_sec
+
+            # 创建 seg_id → 颜色 的映射
+            seg_colors = {t['id']: t['color'] for t in self.oped_templates}
+
+            # 已结束的重复片段（来自 segment_occurrences 的记录）
             for s, e, sid in self.segment_occurrences:
                 if e >= start_t and s <= now:
                     x1 = self.wave_margin_left + plot_w * (max(s, start_t) - start_t) / history_sec
                     x2 = self.wave_margin_left + plot_w * (min(e, now) - start_t) / history_sec
+                    color = seg_colors.get(sid, mark_color)
                     canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
-                                            fill=mark_color, outline="", stipple="gray25")
+                                            fill=color, outline="", stipple="gray25")
+
+            # 正在进行中的匹配区间（持续≥10秒时实时显示）
+            if self.oped_match_active and self.oped_match_start is not None:
+                current_duration = now - self.oped_match_start
+                if current_duration >= 10:
+                    x1 = self.wave_margin_left + plot_w * (max(self.oped_match_start, start_t) - start_t) / history_sec
+                    x2 = self.wave_margin_left + plot_w * (min(now, now) - start_t) / history_sec
+                    # 使用已分类的颜色（若未分类则用默认金色）
+                    color = seg_colors.get(self.oped_pending_id,
+                                           '#FFD700') if self.oped_pending_id is not None else '#FFD700'
+                    canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
+                                            fill=color, outline="", stipple="gray25")
 
         # 绘制数据线
         for wave_data, color in data_list:
@@ -1334,7 +1506,6 @@ class AnimeCelCounter:
                     line_pts.append((self.wave_margin_left + x, self.wave_margin_top + y))
             if len(line_pts) >= 2:
                 canvas.create_line(line_pts, fill=color, width=1, smooth=False)
-
     def _draw_axes_only(self, canvas, plot_w, plot_h, y_max, accent):
         """绘制坐标轴"""
         canvas.create_line(self.wave_margin_left, self.wave_margin_top,
@@ -1349,7 +1520,6 @@ class AnimeCelCounter:
 
     # ---------- OP/ED 检测核心 ----------
     def _detect_oped(self):
-        """检测当前窗口是否与历史片段或已知OP/ED匹配"""
         if not self.oped_enabled or len(self.oped_history_time) < 3:
             return
 
@@ -1365,92 +1535,295 @@ class AnimeCelCounter:
 
         curr_f = np.array(f[-win_points:], dtype=np.float32)
         curr_r = np.array(r[-win_points:], dtype=np.float32)
-        curr_start_time = t[-win_points]
 
-        # 1. 与已知片段匹配
-        for seg in self.known_segments:
-            tpl_f = np.array(seg['template_filtered'])
-            tpl_r = np.array(seg['template_raw'])
-            if len(tpl_f) != win_points:
-                continue
-            corr_f = np.corrcoef(curr_f, tpl_f)[0, 1] if np.std(curr_f) > 1e-6 and np.std(tpl_f) > 1e-6 else 0
-            corr_r = np.corrcoef(curr_r, tpl_r)[0, 1] if np.std(curr_r) > 1e-6 and np.std(tpl_r) > 1e-6 else 0
-            if corr_f > CONFIG["OPED_MATCH_THRESHOLD"] and corr_r > CONFIG["OPED_MATCH_THRESHOLD"]:
-                self._mark_skip_region(seg, curr_start_time, win_len)
-                return
-
-        # 2. 在全部历史中滑动搜索
-        best_corr_f = 0
-        best_corr_r = 0
-        best_start_idx = -1
+        # 搜索历史中最佳匹配窗口
+        best_corr_f = 0.0
+        best_corr_r = 0.0
         for i in range(len(t) - 2 * win_points):
             hist_f = np.array(f[i:i + win_points], dtype=np.float32)
             hist_r = np.array(r[i:i + win_points], dtype=np.float32)
             cf = np.corrcoef(curr_f, hist_f)[0, 1] if np.std(curr_f) > 1e-6 and np.std(hist_f) > 1e-6 else 0
             cr = np.corrcoef(curr_r, hist_r)[0, 1] if np.std(curr_r) > 1e-6 and np.std(hist_r) > 1e-6 else 0
-            if cf > best_corr_f and cr > best_corr_r:
+            if cf > best_corr_f:
                 best_corr_f = cf
+            if cr > best_corr_r:
                 best_corr_r = cr
-                best_start_idx = i
+        threshold = CONFIG["OPED_MATCH_THRESHOLD"]
+        # 一方大于阈值，另一方大于0.8即视为匹配
+        cond1 = best_corr_f > threshold and best_corr_r > 0.8
+        cond2 = best_corr_r > threshold and best_corr_f > 0.8
+        is_match = cond1 or cond2
 
-        if best_corr_f > CONFIG["OPED_MATCH_THRESHOLD"] and best_corr_r > CONFIG["OPED_MATCH_THRESHOLD"]:
-            new_seg = {
-                'template_filtered': f[best_start_idx:best_start_idx + win_points],
-                'template_raw': r[best_start_idx:best_start_idx + win_points],
-                'first_time': t[best_start_idx],
-                'count': 1,
-                'cel_count': 0,
-                'is_counted': False
-            }
-            self.known_segments.append(new_seg)
-            self._mark_skip_region(new_seg, curr_start_time, win_len)
+        def _refine_oped_interval(self, rough_start, rough_end, template_f, template_r):
+            """
+            利用模板对给定的粗略区间进行精细对齐，返回 (refined_start, refined_end)
+            rough_start, rough_end: 秒为单位的时间点
+            template_f, template_r: 模板波形（列表，已与采样间隔对齐）
+            """
+            sample_interval = CONFIG["OPED_SAMPLE_INTERVAL_SEC"]
+            win_len = CONFIG["OPED_WINDOW_SEC"]
+            # 扩展搜索范围：前后各扩展 30 秒
+            search_start = max(0, rough_start - 30)
+            search_end = rough_end + 30
 
-    def _mark_skip_region(self, segment, start_time, window_len):
-        """标记OP/ED区间，暂停统计"""
-        end_time = start_time + window_len
-        self.skip_until_abs_time = end_time
-        self.oped_active_segment = segment
-        self.segment_occurrences.append((start_time, end_time, id(segment)))
-        segment['count'] += 1
+            # 获取最近时间范围内的历史波形（假设 self.oped_history_time 等已存在）
+            times = list(self.oped_history_time)
+            r_vals = list(self.oped_history_raw)  # 使用原始张数进行对齐
+            if len(times) < 2:
+                return rough_start, rough_end
 
-    def _finalize_oped_counting(self):
-        """OP/ED区间结束，若首次出现则计入不重复统计"""
-        if self.oped_active_segment and not self.oped_active_segment.get('is_counted', False):
-            seg = self.oped_active_segment
-            self.oped_unique_cels += seg.get('cel_count', 0)
-            self.oped_unique_time += CONFIG["OPED_WINDOW_SEC"]
-            self.oped_unique_count += 1
-            seg['is_counted'] = True
-        self.oped_active_segment = None
-        self.skip_until_abs_time = 0.0
+            # 将搜索范围限制在已有数据内
+            t_min = times[0]
+            t_max = times[-1]
+            search_start = max(search_start, t_min)
+            search_end = min(search_end, t_max)
+            if search_end - search_start < win_len:
+                return rough_start, rough_end
 
+            # 生成搜索区间内每个可能起点的相关系数
+            step = sample_interval  # 0.5 秒步长
+            start_times = np.arange(search_start, search_end - win_len, step)
+            best_corr = -1
+            best_start = rough_start
+            best_end = rough_start + win_len
+
+            # 将模板波形转换为 numpy 数组（固定长度 win_len 对应的点数）
+            tpl_len = int(win_len / sample_interval)
+            tpl_f = np.array(template_f[:tpl_len]) if len(template_f) >= tpl_len else np.pad(template_f, (0,
+                                                                                                          tpl_len - len(
+                                                                                                              template_f)),
+                                                                                             'constant')
+            tpl_r = np.array(template_r[:tpl_len]) if len(template_r) >= tpl_len else np.pad(template_r, (0,
+                                                                                                          tpl_len - len(
+                                                                                                              template_r)),
+                                                                                             'constant')
+
+            for start_t in start_times:
+                # 找到对应索引
+                idx_start = self._find_nearest_index(times, start_t)
+                idx_end = self._find_nearest_index(times, start_t + win_len)
+                if idx_end - idx_start + 1 < tpl_len // 2:
+                    continue
+                # 截取实际波形（原始张数）
+                seg_r = np.array(r_vals[idx_start:idx_end + 1])
+                # 重采样到与模板相同长度（线性插值）
+                if len(seg_r) != tpl_len:
+                    # 简单线性插值
+                    x_old = np.linspace(0, 1, len(seg_r))
+                    x_new = np.linspace(0, 1, tpl_len)
+                    seg_r = np.interp(x_new, x_old, seg_r)
+                # 计算相关系数
+                if np.std(seg_r) > 1e-6 and np.std(tpl_r) > 1e-6:
+                    corr = np.corrcoef(seg_r, tpl_r)[0, 1]
+                    if corr > best_corr:
+                        best_corr = corr
+                        best_start = start_t
+                        best_end = start_t + win_len
+
+            # 如果最优相关系数仍很低（<0.6），放弃修正
+            if best_corr < 0.6:
+                return rough_start, rough_end
+            return best_start, best_end
+
+        def _find_nearest_index(self, lst, value):
+            """返回列表中值最接近 value 的索引"""
+            return min(range(len(lst)), key=lambda i: abs(lst[i] - value))
+        # ------ 连续匹配判定 ------
+        if is_match:
+            self.oped_match_count += 1
+            self.oped_mismatch_count = 0
+        else:
+            self.oped_mismatch_count += 1
+            self.oped_match_count = 0
+
+        # 进入匹配状态
+        if not self.oped_match_active and self.oped_match_count >= self.OPED_ENTER_COUNT:
+            self.oped_match_active = True
+            detection_time = t[-1]
+            half_win = win_len / 2.0
+            self.oped_match_start = max(0, detection_time - half_win)
+            wave_feature = curr_f.tolist()
+            self.oped_pending_id = self._classify_segment(wave_feature)
+
+        # 退出匹配状态
+        if self.oped_match_active and self.oped_mismatch_count >= self.OPED_EXIT_COUNT:
+            self.oped_match_active = False
+            match_end = t[-1]  # 取最后一次检测时间
+            duration = match_end - self.oped_match_start
+
+            # 新增：如果区间长度超过60秒，进行精确定位修正（延迟5秒执行）
+            if duration >= 60 and self.oped_pending_id is not None:
+                # 获取模板波形（原始和过滤后均可，这里用原始）
+                template = None
+                for tmpl in self.oped_templates:
+                    if tmpl['id'] == self.oped_pending_id:
+                        template = tmpl['wave']
+                        break
+                if template is not None:
+                    # 延迟5秒后再进行修正，以获取结束后的数据
+                    def refine_after_delay():
+                        refined_start, refined_end = self._refine_oped_interval(
+                            self.oped_match_start, match_end,
+                            template, template  # 这里两个参数都用原始波形模板
+                        )
+                        # 如果修正后的区间更合理，则更新 segment_occurrences 中的记录
+                        # 注意：原始记录可能已经被添加，需要替换掉最后一条
+                        if len(self.segment_occurrences) > 0 and self.segment_occurrences[-1][
+                            2] == self.oped_pending_id:
+                            # 替换最后一个区间
+                            self.segment_occurrences[-1] = (refined_start, refined_end, self.oped_pending_id)
+                        else:
+                            # 否则新增
+                            self.segment_occurrences.append((refined_start, refined_end, self.oped_pending_id))
+                        # 同时更新扣除区间（如果长度足够）
+                        if refined_end - refined_start >= 30:
+                            self._apply_oped_deduction(refined_start, refined_end)
+
+                    # 启动定时器（需在主线程或使用 threading.Timer）
+                    import threading
+                    timer = threading.Timer(5.0, refine_after_delay)
+                    timer.daemon = True
+                    timer.start()
+
+            # 原始的高亮和扣除逻辑（保留，但修正后可能重复，建议只在修正失败时使用）
+            if duration >= 20:
+                if self.oped_pending_id is None:
+                    wave_feature = curr_f.tolist()
+                    self.oped_pending_id = self._classify_segment(wave_feature)
+                # 仅在未修正或修正未完成时临时添加（实际修正后会替换）
+                # 为了避免重复，可先添加临时区间，后续由修正替换
+                self.segment_occurrences.append(
+                    (self.oped_match_start, match_end, self.oped_pending_id)
+                )
+            # 原扣除门槛80秒，现在交给修正后的30秒门槛，所以这里注释掉
+            # if duration >= 80:
+            #     self._apply_oped_deduction(self.oped_match_start, match_end)
+
+            self.oped_pending_id = None
+
+    def _classify_segment(self, wave_feature):
+        """
+        根据波形特征与已有模板的相关系数归类，
+        返回类别ID。若为新类别，则创建模板并分配颜色。
+        """
+        threshold = 0.8   # 归类相关系数阈值
+        best_corr = 0.0
+        best_id = -1
+        best_idx = -1
+
+        for idx, template in enumerate(self.oped_templates):
+            tpl_wave = np.array(template['wave'])
+            min_len = min(len(wave_feature), len(tpl_wave))
+            if min_len < 5:
+                continue
+            corr = np.corrcoef(wave_feature[:min_len], tpl_wave[:min_len])[0, 1]
+            if corr > best_corr:
+                best_corr = corr
+                best_id = template['id']
+                best_idx = idx
+
+        if best_corr >= threshold:
+            # 用当前波形平滑更新模板
+            tpl_wave = np.array(self.oped_templates[best_idx]['wave'])
+            min_len = min(len(wave_feature), len(tpl_wave))
+            updated_wave = 0.7 * tpl_wave[:min_len] + 0.3 * np.array(wave_feature[:min_len])
+            self.oped_templates[best_idx]['wave'] = updated_wave.tolist()
+            return best_id
+        else:
+            # 新建类别
+            new_id = len(self.oped_templates)
+            color = self.oped_color_palette[self.oped_next_color_idx % len(self.oped_color_palette)]
+            self.oped_next_color_idx += 1
+            self.oped_templates.append({
+                'id': new_id,
+                'wave': wave_feature,
+                'color': color
+            })
+            return new_id
     def _save_record(self):
         """保存当前运行记录到 JSON 文件"""
         import tkinter.simpledialog as sd
         name = sd.askstring("保存记录", "输入记录名称：")
         if not name:
             return
+        net_cels = self.total_cels_count - self.oped_deducted_cels
+        net_time = self.elapsed_time - self.oped_deducted_time
         record = {
             "name": name,
-            "total_cels": self.total_cels_count + self.oped_unique_cels,
-            "total_time": self.elapsed_time,
-            "avg_fps": (self.total_cels_count + self.oped_unique_cels) / self.elapsed_time if self.elapsed_time > 0 else 0,
-            "oped_unique_cels": self.oped_unique_cels,
-            "oped_unique_time": self.oped_unique_time,
+            "total_cels": net_cels,
+            "total_time": net_time,
+            "avg_fps": net_cels / net_time if net_time > 0 else 0,
+            "oped_unique_cels": self.oped_deducted_cels,  # 可选：保留 OP/ED 数据
+            "oped_unique_time": self.oped_deducted_time,
             "record_time": time.strftime("%Y-%m-%d %H:%M:%S")
         }
-        path = os.path.join(os.path.expanduser("~"), "cel_counter_records.json")
+        settings_dir = os.path.dirname(self._get_settings_path())
+        path = os.path.join(settings_dir, "cel_counter_records.json")
+
         try:
-            with open(path, "r") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 records = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             records = []
         records.append(record)
-        with open(path, "w") as f:
-            json.dump(records, f, indent=2)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(records, f, indent=2, ensure_ascii=False)
         import tkinter.messagebox as mb
         mb.showinfo("保存成功", f"记录已保存至 {path}")
 
+    def _add_highlight_interval(self, start, end):
+        """将重复区间加入高亮列表，用于波形绘制"""
+        last = self.segment_occurrences[-1] if self.segment_occurrences else None
+        if last and abs(last[0] - start) < 0.5 and abs(last[1] - end) < 0.5:
+            return
+        self.segment_occurrences.append((start, end, 0))
+
+    def _apply_oped_deduction(self, start, end):
+        """计算并扣除指定 OP/ED 区间的张数和时长"""
+        # 去重检查
+        for old_start, old_end in self.deducted_intervals:
+            if abs(old_start - start) < 1.0 and abs(old_end - end) < 1.0:
+                return
+        self.deducted_intervals.append((start, end))
+
+        # 从 total_history 中提取区间内的累计张数增量
+        history = list(self.total_history)
+        if not history:
+            return
+
+        start_cels = None
+        end_cels = None
+
+        # 正向查找区间起始对应的累计张数
+        for item in history:
+            t, _, filtered_total, *_ = item
+            if t <= start:
+                start_cels = filtered_total
+
+        # 如果找不到 start 之前的记录（区间开始太早），放弃本次扣除
+        if start_cels is None:
+            return
+
+        # 反向查找区间结束对应的累计张数
+        for item in reversed(history):
+            t, _, filtered_total, *_ = item
+            if t >= end:
+                end_cels = filtered_total
+            else:
+                break
+
+        # 如果 end 超过了历史记录范围，用最新记录的累计值代替
+        if end_cels is None:
+            end_cels = history[-1][2]
+
+        cels_in_interval = end_cels - start_cels
+        # 防止出现负数导致扣除量反向增加
+        if cels_in_interval < 0:
+            cels_in_interval = 0
+
+        time_in_interval = end - start
+        self.oped_deducted_cels += cels_in_interval
+        self.oped_deducted_time += time_in_interval
     def _draw_settings_wave(self):
         """绘制设置界面中的总张数波形（过滤前后及各类过滤数量）"""
         if not hasattr(self, 'settings_wave_canvas') or self.settings_wave_canvas is None:
