@@ -32,7 +32,7 @@ class PreviewManager:
         self.motion_history = None
 
         # 显示标志
-        self.show_dense = None
+        self.show_dense = False            # 默认关闭稠密光流
         self.show_sparse = True
         self.show_curr = True
         self.show_diff = True

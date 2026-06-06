@@ -1,0 +1,149 @@
+[
+  {
+    "name": "阿迪斯",
+    "total_cels": 3772,
+    "total_time": 575.3417913913727,
+    "avg_fps": 6.556102922539344,
+    "oped_unique_cels": 0,
+    "oped_unique_time": 0.0,
+    "record_time": "2026-06-05 19:15:32"
+  },
+  {
+    "name": "aaa",
+    "total_cels": 10406,
+    "total_time": 1672.701737165451,
+    "avg_fps": 6.22107323068483,
+    "oped_unique_cels": 0,
+    "oped_unique_time": 0.0,
+    "record_time": "2026-06-05 21:49:19"
+  },
+  {
+    "name": "DD",
+    "record_time": "2026-06-05 23:34:46",
+    "start_timestamp": 1780671756.732344,
+    "end_timestamp": 1780673686.4057322,
+    "duration_sec": 1888.83,
+    "total_raw_cels": 17776,
+    "total_filtered_cels": 9881,
+    "filtering": {
+      "translation": 2177,
+      "optical_flow": 740,
+      "hash": 1690,
+      "still": 318,
+      "local_motion": 2708,
+      "zoom": 272,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 0,
+      "total_deducted_time": 0.0,
+      "segments": [
+        {
+          "start": 1752.91,
+          "end": 1799.93,
+          "duration": 47.02,
+          "segment_id": 0,
+          "deducted_cels": 427,
+          "deducted_time": 47.02
+        }
+      ]
+    },
+    "avg_fps_filtered": 5.23,
+    "avg_fps_raw": 9.41,
+    "extra": {
+      "max_instant_fps": 25.51,
+      "min_instant_fps": 0.0,
+      "median_fps": 4.09
+    }
+  },
+  {
+    "name": "6",
+    "record_time": "2026-06-06 07:49:59",
+    "start_timestamp": 1780686020.6460721,
+    "end_timestamp": 1780703399.7543545,
+    "duration_sec": 17308.61,
+    "total_raw_cels": 159227,
+    "total_filtered_cels": 82001,
+    "filtering": {
+      "translation": 26102,
+      "optical_flow": 6195,
+      "hash": 15095,
+      "still": 3402,
+      "local_motion": 24853,
+      "zoom": 1720,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 0,
+      "total_deducted_time": 0.0,
+      "segments": []
+    },
+    "avg_fps_filtered": 4.74,
+    "avg_fps_raw": 9.2,
+    "extra": {
+      "max_instant_fps": 25.47,
+      "min_instant_fps": 0.0,
+      "median_fps": 3.1
+    }
+  },
+  {
+    "name": "aaaa",
+    "record_time": "2026-06-06 11:14:09",
+    "start_timestamp": 1780714817.5648425,
+    "end_timestamp": 1780715649.9982655,
+    "duration_sec": 819.19,
+    "total_raw_cels": 12167,
+    "total_filtered_cels": 7199,
+    "filtering": {
+      "translation": 2260,
+      "optical_flow": 659,
+      "hash": 0,
+      "still": 168,
+      "local_motion": 1696,
+      "zoom": 210,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 0,
+      "total_deducted_time": 0.0,
+      "segments": []
+    },
+    "avg_fps_filtered": 8.79,
+    "avg_fps_raw": 14.85,
+    "extra": {
+      "max_instant_fps": 25.54,
+      "min_instant_fps": 0.0,
+      "median_fps": 6.25
+    }
+  },
+  {
+    "name": "adsz",
+    "record_time": "2026-06-06 11:30:50",
+    "start_timestamp": 1780716087.4839988,
+    "end_timestamp": 1780716650.8772333,
+    "duration_sec": 563.37,
+    "total_raw_cels": 6834,
+    "total_filtered_cels": 3794,
+    "filtering": {
+      "translation": 559,
+      "optical_flow": 167,
+      "hash": 324,
+      "still": 106,
+      "local_motion": 1657,
+      "zoom": 234,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 0,
+      "total_deducted_time": 0.0,
+      "segments": []
+    },
+    "avg_fps_filtered": 6.73,
+    "avg_fps_raw": 12.13,
+    "extra": {
+      "max_instant_fps": 25.47,
+      "min_instant_fps": 0.0,
+      "median_fps": 5.14
+    }
+  }
+]

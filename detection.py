@@ -16,9 +16,24 @@ def compute_hash(gray_img):
     resized = cv2.resize(gray_img, (16, 16), interpolation=cv2.INTER_AREA)
     avg = resized.mean()
     return (resized > avg).flatten()
-
-
-
+def compute_oped_hash(gray_img):     # <-- 从此行开始替换整个函数
+    """
+    使用感知哈希 (pHash) 计算 64 位哈希值，用于 OP/ED 匹配。
+    流程：缩放 -> DCT -> 取左上角 8x8 低频系数 -> 二值化。
+    返回整数 (64 位)。
+    """
+    # 1. 缩放为 32x32（提高分辨率以增加信息量）
+    resized = cv2.resize(gray_img, (32, 32), interpolation=cv2.INTER_AREA)
+    # 2. 离散余弦变换
+    dct = cv2.dct(np.float32(resized))
+    # 3. 保留左上角 8x8 低频分量（64 位）
+    dct_low = dct[:8, :8]
+    # 4. 计算均值并二值化
+    avg = dct_low.mean()
+    bits = dct_low > avg
+    # 5. 打包为 64 位整数 (little-endian)
+    packed = np.packbits(bits.flatten())
+    return int.from_bytes(packed.tobytes(), 'little')
 def adaptive_threshold(frame):
     """根据帧的平均亮度计算自适应差分阈值"""
     mean_val = np.mean(frame)

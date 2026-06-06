@@ -1,20 +1,19 @@
 # main.py
-import cv2
-import numpy as np
-import tkinter as tk
-import time
-import threading
-import json
 import copy
+import json
 import os
 import sys
+import threading
+import time
+import tkinter as tk
 from collections import deque
 
+import cv2
+import numpy as np
+
 from config import CONFIG, CONFIG_DEFAULT, color_manager
-from widgets import DraggablePanel
 from detection import (
-    compute_hash, adaptive_threshold,
-    is_raw_change, basic_is_new_cel, full_is_new_cel
+    compute_hash, is_raw_change, basic_is_new_cel, full_is_new_cel, compute_oped_hash
 )
 from preview import PreviewManager
 from ui import build_main_ui, create_settings_window, create_crop_window
@@ -91,13 +90,16 @@ class AnimeCelCounter:
         self.total_zoom_filtered = 0
         self.color_vars = {}
         self.load_settings()
-
+        self.instant_fps_history = deque(maxlen=3600)  # 保存最近1小时的每秒张数
         # ---------- OP/ED 检测 ----------
         self.oped_enabled = CONFIG["OPED_DETECTION_ENABLED"]
         self.oped_history_time = deque()
         self.oped_history_filtered = deque()  # 每秒过滤后张数
         self.oped_history_raw = deque()       # 每秒过滤前张数
+        # ---------- OP/ED 哈希匹配 ----------
+        self.oped_hash_seq = deque()       # 存储 (elapsed_time, hash_int) ，最大长度与历史一致
         self.oped_last_sample_time = 0.0
+
         # 连续匹配状态
         self.consecutive_match_start = None
 
@@ -114,8 +116,8 @@ class AnimeCelCounter:
         self.oped_next_color_idx = 0
 
         # 匹配进入/退出阈值
-        self.OPED_ENTER_COUNT = 1  # 连续匹配a次确认为OP/ED区间开始  设置1直接退出
-        self.OPED_EXIT_COUNT = 1  # 同上，结束区间
+        self.OPED_ENTER_COUNT = 3  # 连续匹配a次确认为OP/ED区间开始  设置1直接退出
+        self.OPED_EXIT_COUNT = 3  # 同上，结束区间
         # OP/ED 累计扣除数据
         self.oped_deducted_cels = 0
         self.oped_deducted_time = 0.0
@@ -131,7 +133,10 @@ class AnimeCelCounter:
         self.oped_unique_time = 0.0           # 不重复 OP/ED 总时长
         self.oped_unique_count = 0            # 不重复片段个数
         self.oped_active_segment = None       # 当前正在跳过的 OP/ED 片段引用
-
+        self._refine_lock = threading.Lock()
+        self._refining = False
+        self.start_real_time = time.time()
+        self.start_elapsed_time = 0.0  # 实际上 elapsed_time 从 0 开始
         # ---------- 哈希缓冲区 ----------
         self.frame_buffer = deque(maxlen=CONFIG["FRAME_BUFFER_SIZE"])
         self.hash_threshold = CONFIG["HASH_THRESHOLD"]
@@ -716,10 +721,16 @@ class AnimeCelCounter:
             if idx >= len(records):
                 return
             rec = records[idx]
+            avg_fps_val = rec.get('avg_fps', 'N/A')
+            if isinstance(avg_fps_val, (int, float)):
+                avg_fps_str = f"{avg_fps_val:.2f}"
+            else:
+                avg_fps_str = str(avg_fps_val)
+
             info = (f"名称: {rec['name']}\n"
                     f"总张数: {rec.get('total_cels', 'N/A')}\n"
                     f"总时长: {rec.get('total_time', 'N/A')} 秒\n"
-                    f"平均帧率: {rec.get('avg_fps', 'N/A'):.2f}\n"
+                    f"平均帧率: {avg_fps_str}\n"
                     f"记录时间: {rec.get('record_time', 'N/A')}")
             import tkinter.messagebox as messagebox
             messagebox.showinfo("记录详情", info)
@@ -1143,24 +1154,34 @@ class AnimeCelCounter:
                 with self.lock:
                     fc = self.current_cels
                     rc = self.current_raw_cels
-                self.oped_history_time.append(self.elapsed_time)  # 改为运行时长
+                self.oped_history_time.append(self.elapsed_time)
                 self.oped_history_filtered.append(fc)
                 self.oped_history_raw.append(rc)
+
+                # 图像哈希采样
+                if CONFIG.get("OPED_HASH_ENABLED", True):
+                    h = compute_oped_hash(now_frame)
+                    self.oped_hash_seq.append((self.elapsed_time, h))
+
+                self.instant_fps_history.append((self.elapsed_time, self.current_cels))
 
                 max_points = int(CONFIG["OPED_HISTORY_HOURS"] * 3600 / oped_sample_interval)
                 while len(self.oped_history_time) > max_points:
                     self.oped_history_time.popleft()
                     self.oped_history_filtered.popleft()
                     self.oped_history_raw.popleft()
-                self.oped_last_sample_time = now_ts  # 采样间隔控制仍用绝对时间
+                while len(self.oped_hash_seq) > max_points:
+                    self.oped_hash_seq.popleft()
 
-
-
-            # OP/ED 检测（每5秒一次）
-            if self.oped_enabled and now_ts - last_oped_detect_time >= oped_detect_interval:
-                self._detect_oped()
-                last_oped_detect_time = now_ts
-
+                self.oped_last_sample_time = now_ts
+            # ====== 新增：定期触发 OP/ED 检测 ======
+            # 每 2 秒执行一次全量检测（与 last_oped_detect_time 配合）
+            if self.oped_enabled:
+                if not hasattr(self, '_last_oped_detect_time'):
+                    self._last_oped_detect_time = 0.0
+                if now_ts - self._last_oped_detect_time >= 2.0:
+                    self._detect_oped()
+                    self._last_oped_detect_time = now_ts
     # ---------- UI 更新与波形 ----------
     def loop(self):
         """主 UI 更新循环"""
@@ -1305,6 +1326,7 @@ class AnimeCelCounter:
         self.oped_history_time.clear()
         self.oped_history_filtered.clear()
         self.oped_history_raw.clear()
+        self.oped_hash_seq.clear()
         self.oped_last_sample_time = 0.0
         self.known_segments.clear()
         self.segment_occurrences.clear()
@@ -1352,6 +1374,7 @@ class AnimeCelCounter:
         self.preview_manager.stop()
         self.root.destroy()
 
+        self.end_real_time = time.time()
     def get_status(self, v):
         """根据当前张数返回状态描述"""
         if self.full_filter_active:
@@ -1520,246 +1543,391 @@ class AnimeCelCounter:
 
     # ---------- OP/ED 检测核心 ----------
     def _detect_oped(self):
-        if not self.oped_enabled or len(self.oped_history_time) < 3:
+        """基于图像哈希的 OP/ED 重复检测（滑动窗口汉明距离最小）"""
+        if not self.oped_enabled or not CONFIG.get("OPED_HASH_ENABLED", True):
+            return
+        if len(self.oped_hash_seq) < 2:
             return
 
         win_len = CONFIG["OPED_WINDOW_SEC"]
         sample_interval = CONFIG["OPED_SAMPLE_INTERVAL_SEC"]
         win_points = int(win_len / sample_interval)
-        if len(self.oped_history_time) < win_points:
+        if len(self.oped_hash_seq) < 2 * win_points:
             return
 
-        t = list(self.oped_history_time)
-        f = list(self.oped_history_filtered)
-        r = list(self.oped_history_raw)
+        # 获取当前窗口的哈希序列（最近 win_points 帧）
+        seq = list(self.oped_hash_seq)
+        query = [h for _, h in seq[-win_points:]]
+        history = [h for _, h in seq]
 
-        curr_f = np.array(f[-win_points:], dtype=np.float32)
-        curr_r = np.array(r[-win_points:], dtype=np.float32)
+        max_dist = CONFIG["OPED_HASH_MAX_DIST"]
+        best_start_idx = -1
+        best_total_dist = float('inf')
 
-        # 搜索历史中最佳匹配窗口
-        best_corr_f = 0.0
-        best_corr_r = 0.0
-        for i in range(len(t) - 2 * win_points):
-            hist_f = np.array(f[i:i + win_points], dtype=np.float32)
-            hist_r = np.array(r[i:i + win_points], dtype=np.float32)
-            cf = np.corrcoef(curr_f, hist_f)[0, 1] if np.std(curr_f) > 1e-6 and np.std(hist_f) > 1e-6 else 0
-            cr = np.corrcoef(curr_r, hist_r)[0, 1] if np.std(curr_r) > 1e-6 and np.std(hist_r) > 1e-6 else 0
-            if cf > best_corr_f:
-                best_corr_f = cf
-            if cr > best_corr_r:
-                best_corr_r = cr
-        threshold = CONFIG["OPED_MATCH_THRESHOLD"]
-        # 一方大于阈值，另一方大于0.8即视为匹配
-        cond1 = best_corr_f > threshold and best_corr_r > 0.8
-        cond2 = best_corr_r > threshold and best_corr_f > 0.8
-        is_match = cond1 or cond2
+        n_hist = len(history)
+        dist_matrix = np.zeros((win_points, n_hist), dtype=np.int32)
+        for k in range(win_points):
+            q_hash = query[k]
+            for t in range(n_hist):
+                dist_matrix[k, t] = bin(q_hash ^ history[t]).count('1')
 
-        def _refine_oped_interval(self, rough_start, rough_end, template_f, template_r):
-            """
-            利用模板对给定的粗略区间进行精细对齐，返回 (refined_start, refined_end)
-            rough_start, rough_end: 秒为单位的时间点
-            template_f, template_r: 模板波形（列表，已与采样间隔对齐）
-            """
-            sample_interval = CONFIG["OPED_SAMPLE_INTERVAL_SEC"]
-            win_len = CONFIG["OPED_WINDOW_SEC"]
-            # 扩展搜索范围：前后各扩展 30 秒
-            search_start = max(0, rough_start - 30)
-            search_end = rough_end + 30
+        # 获取 query 窗口的开始时间（用于排除重叠窗口）
+        query_start_time = seq[-win_points][0] if len(seq) >= win_points else 0
 
-            # 获取最近时间范围内的历史波形（假设 self.oped_history_time 等已存在）
-            times = list(self.oped_history_time)
-            r_vals = list(self.oped_history_raw)  # 使用原始张数进行对齐
-            if len(times) < 2:
-                return rough_start, rough_end
 
-            # 将搜索范围限制在已有数据内
-            t_min = times[0]
-            t_max = times[-1]
-            search_start = max(search_start, t_min)
-            search_end = min(search_end, t_max)
-            if search_end - search_start < win_len:
-                return rough_start, rough_end
+        for t in range(n_hist - win_points + 1):
+            # 排除与当前 query 窗口重叠的历史窗口
+            hist_end_time = seq[t + win_points - 1][0]
+            if hist_end_time >= query_start_time:
+                continue
 
-            # 生成搜索区间内每个可能起点的相关系数
-            step = sample_interval  # 0.5 秒步长
-            start_times = np.arange(search_start, search_end - win_len, step)
-            best_corr = -1
-            best_start = rough_start
-            best_end = rough_start + win_len
+            total = 0
+            for k in range(win_points):
+                total += dist_matrix[k, t + k]
+            if total < best_total_dist:
+                best_total_dist = total
+                best_start_idx = t
+        if best_start_idx < 0:
+            return
 
-            # 将模板波形转换为 numpy 数组（固定长度 win_len 对应的点数）
-            tpl_len = int(win_len / sample_interval)
-            tpl_f = np.array(template_f[:tpl_len]) if len(template_f) >= tpl_len else np.pad(template_f, (0,
-                                                                                                          tpl_len - len(
-                                                                                                              template_f)),
-                                                                                             'constant')
-            tpl_r = np.array(template_r[:tpl_len]) if len(template_r) >= tpl_len else np.pad(template_r, (0,
-                                                                                                          tpl_len - len(
-                                                                                                              template_r)),
-                                                                                             'constant')
-
-            for start_t in start_times:
-                # 找到对应索引
-                idx_start = self._find_nearest_index(times, start_t)
-                idx_end = self._find_nearest_index(times, start_t + win_len)
-                if idx_end - idx_start + 1 < tpl_len // 2:
-                    continue
-                # 截取实际波形（原始张数）
-                seg_r = np.array(r_vals[idx_start:idx_end + 1])
-                # 重采样到与模板相同长度（线性插值）
-                if len(seg_r) != tpl_len:
-                    # 简单线性插值
-                    x_old = np.linspace(0, 1, len(seg_r))
-                    x_new = np.linspace(0, 1, tpl_len)
-                    seg_r = np.interp(x_new, x_old, seg_r)
-                # 计算相关系数
-                if np.std(seg_r) > 1e-6 and np.std(tpl_r) > 1e-6:
-                    corr = np.corrcoef(seg_r, tpl_r)[0, 1]
-                    if corr > best_corr:
-                        best_corr = corr
-                        best_start = start_t
-                        best_end = start_t + win_len
-
-            # 如果最优相关系数仍很低（<0.6），放弃修正
-            if best_corr < 0.6:
-                return rough_start, rough_end
-            return best_start, best_end
-
-        def _find_nearest_index(self, lst, value):
-            """返回列表中值最接近 value 的索引"""
-            return min(range(len(lst)), key=lambda i: abs(lst[i] - value))
-        # ------ 连续匹配判定 ------
-        if is_match:
+        similar_count = sum(1 for k in range(win_points)
+                            if dist_matrix[k, best_start_idx + k] <= max_dist)
+        match = (similar_count / win_points) >= CONFIG.get("OPED_HASH_WIN_RATIO", 0.8)
+        # 调试打印：每次检测都输出关键信息
+        print(f"[OPED] ratio={similar_count / win_points:.3f} "
+              f"best_start={best_start_idx} "
+              f"query_end={len(history) - 1} "
+              f"match={match} "
+              f"match_cnt={self.oped_match_count} "
+              f"mismatch_cnt={self.oped_mismatch_count}")
+        dists = [dist_matrix[k, best_start_idx + k] for k in range(win_points)]
+        print("Dists sample:", dists[:10], "mean:", np.mean(dists))
+        # 状态机：连续匹配判定
+        if match:
             self.oped_match_count += 1
             self.oped_mismatch_count = 0
         else:
             self.oped_mismatch_count += 1
             self.oped_match_count = 0
-
         # 进入匹配状态
         if not self.oped_match_active and self.oped_match_count >= self.OPED_ENTER_COUNT:
             self.oped_match_active = True
-            detection_time = t[-1]
-            half_win = win_len / 2.0
-            self.oped_match_start = max(0, detection_time - half_win)
-            wave_feature = curr_f.tolist()
-            self.oped_pending_id = self._classify_segment(wave_feature)
+            # 匹配起点为当前查询窗口的起始时间（即当前 OP/ED 的开始）
+            self.oped_match_start = seq[-win_points][0] if len(seq) >= win_points else self.elapsed_time
+            # 归类
+            self.oped_pending_id = self._classify_hash_segment(query)
+
+
+
 
         # 退出匹配状态
         if self.oped_match_active and self.oped_mismatch_count >= self.OPED_EXIT_COUNT:
             self.oped_match_active = False
-            match_end = t[-1]  # 取最后一次检测时间
+            match_end = seq[-1][0]  # 当前时间
             duration = match_end - self.oped_match_start
 
-            # 新增：如果区间长度超过60秒，进行精确定位修正（延迟5秒执行）
-            if duration >= 60 and self.oped_pending_id is not None:
-                # 获取模板波形（原始和过滤后均可，这里用原始）
-                template = None
-                for tmpl in self.oped_templates:
-                    if tmpl['id'] == self.oped_pending_id:
-                        template = tmpl['wave']
-                        break
-                if template is not None:
-                    # 延迟5秒后再进行修正，以获取结束后的数据
-                    def refine_after_delay():
-                        refined_start, refined_end = self._refine_oped_interval(
-                            self.oped_match_start, match_end,
-                            template, template  # 这里两个参数都用原始波形模板
-                        )
-                        # 如果修正后的区间更合理，则更新 segment_occurrences 中的记录
-                        # 注意：原始记录可能已经被添加，需要替换掉最后一条
-                        if len(self.segment_occurrences) > 0 and self.segment_occurrences[-1][
-                            2] == self.oped_pending_id:
-                            # 替换最后一个区间
-                            self.segment_occurrences[-1] = (refined_start, refined_end, self.oped_pending_id)
-                        else:
-                            # 否则新增
-                            self.segment_occurrences.append((refined_start, refined_end, self.oped_pending_id))
-                        # 同时更新扣除区间（如果长度足够）
-                        if refined_end - refined_start >= 30:
-                            self._apply_oped_deduction(refined_start, refined_end)
 
-                    # 启动定时器（需在主线程或使用 threading.Timer）
-                    import threading
-                    timer = threading.Timer(5.0, refine_after_delay)
-                    timer.daemon = True
-                    timer.start()
-
-            # 原始的高亮和扣除逻辑（保留，但修正后可能重复，建议只在修正失败时使用）
+            # 基本高亮
             if duration >= 20:
-                if self.oped_pending_id is None:
-                    wave_feature = curr_f.tolist()
-                    self.oped_pending_id = self._classify_segment(wave_feature)
-                # 仅在未修正或修正未完成时临时添加（实际修正后会替换）
-                # 为了避免重复，可先添加临时区间，后续由修正替换
                 self.segment_occurrences.append(
                     (self.oped_match_start, match_end, self.oped_pending_id)
                 )
-            # 原扣除门槛80秒，现在交给修正后的30秒门槛，所以这里注释掉
-            # if duration >= 80:
-            #     self._apply_oped_deduction(self.oped_match_start, match_end)
 
             self.oped_pending_id = None
 
-    def _classify_segment(self, wave_feature):
+
+    def _find_nearest_index(self, lst, value):
+        """返回列表中值最接近 value 的索引"""
+        return min(range(len(lst)), key=lambda i: abs(lst[i] - value))
+
+    def _schedule_refine(self, rough_start, rough_end, template_f, template_r, pending_id):
         """
-        根据波形特征与已有模板的相关系数归类，
-        返回类别ID。若为新类别，则创建模板并分配颜色。
+        延迟启动精确定位修正（异步，无锁，防并发）
         """
-        threshold = 0.8   # 归类相关系数阈值
-        best_corr = 0.0
+        def delayed():
+            with self._refine_lock:
+                if self._refining:
+                    return
+                self._refining = True
+            try:
+                # 1. 快速复制所需数据（加锁）
+                with self.lock:
+                    times = list(self.oped_history_time)
+                    f_vals = list(self.oped_history_filtered)
+                    r_vals = list(self.oped_history_raw)
+                # 2. 执行耗时计算（无锁）
+                refined_start, refined_end = self._do_refine(
+                    rough_start, rough_end,
+                    template_f, template_r,
+                    times, f_vals, r_vals
+                )
+                # 3. 快速写回结果（加锁）
+                with self.lock:
+                    # 更新 segment_occurrences
+                    if (len(self.segment_occurrences) > 0 and
+                            self.segment_occurrences[-1][2] == pending_id):
+                        self.segment_occurrences[-1] = (refined_start, refined_end, pending_id)
+                    else:
+                        self.segment_occurrences.append((refined_start, refined_end, pending_id))
+                    if refined_end - refined_start >= 30:
+                        self._apply_oped_deduction(refined_start, refined_end)
+            finally:
+                with self._refine_lock:
+                    self._refining = False
+
+        timer = threading.Timer(5.0, delayed)
+        timer.daemon = True
+        timer.start()
+
+    def _do_refine(self, rough_start, rough_end, template_f, template_r,
+                   times, f_vals, r_vals):
+        """
+        基于 FFT 快速互相关精确定位 OP/ED 区间起止。
+        步骤：
+          1. 降采样到 2 秒间隔
+          2. 在降采样信号上 FFT 互相关找到最佳偏移
+          3. 在原采样率下，仅在最佳偏移附近小范围精确匹配
+        此函数不持有任何锁，可安全在后台线程执行。
+        """
+        sample_interval = CONFIG["OPED_SAMPLE_INTERVAL_SEC"]
+        win_len = CONFIG["OPED_WINDOW_SEC"]
+        search_start = max(0, rough_start - 30)
+        search_end = rough_end + 30
+
+        if len(times) < 2:
+            return rough_start, rough_end
+
+        t_min, t_max = times[0], times[-1]
+        search_start = max(search_start, t_min)
+        search_end = min(search_end, t_max)
+        if search_end - search_start < win_len:
+            return rough_start, rough_end
+
+        # ---------- 1. 生成等间隔采样信号（避免时间轴不均匀）----------
+        t = np.array(times)
+        f_arr = np.array(f_vals)
+        r_arr = np.array(r_vals)
+        # 统一时间轴：从 search_start 到 search_end - win_len，步长 sample_interval
+        # 但 FFT 需要覆盖整个 search 范围到 search_end（含模板长度）
+        # 信号长度：search_start ～ search_end
+        # 模板长度：win_len 秒
+        # 我们将信号扩展为 search_start ～ search_end，以便滑动模板
+        uniform_t = np.arange(search_start, search_end + sample_interval, sample_interval)
+        # 插值得到等间隔序列
+        signal_f = np.interp(uniform_t, t, f_arr)
+        signal_r = np.interp(uniform_t, t, r_arr)
+
+        # 模板：win_len 秒对应点数
+        tpl_len = int(win_len / sample_interval)
+        tpl_f = np.array(template_f[:tpl_len]) if len(template_f) >= tpl_len else np.pad(
+            template_f, (0, tpl_len - len(template_f)), 'constant')
+        tpl_r = np.array(template_r[:tpl_len]) if len(template_r) >= tpl_len else np.pad(
+            template_r, (0, tpl_len - len(template_r)), 'constant')
+
+        # ---------- 2. 降采样到约 2 秒间隔，加速 FFT ----------
+        ds_factor = max(1, int(2.0 / sample_interval))  # 2秒一个点
+        signal_f_ds = signal_f[::ds_factor]
+        signal_r_ds = signal_r[::ds_factor]
+        tpl_f_ds = tpl_f[::ds_factor]
+        tpl_r_ds = tpl_r[::ds_factor]
+
+        # 确保降采样后模板长度至少为 3
+        if len(tpl_f_ds) < 3:
+            ds_factor = 1
+            signal_f_ds, signal_r_ds = signal_f, signal_r
+            tpl_f_ds, tpl_r_ds = tpl_f, tpl_r
+
+
+
+
+        # ---------- 3. 在降采样信号上 FFT 互相关 ----------
+        def fft_argmax_offset(signal, template):
+            """返回归一化互相关最大的偏移量（0 <= offset <= len(signal)-len(template)）"""
+            s = signal - np.mean(signal)
+            t = template - np.mean(template)
+            n = len(s)
+            m = len(t)
+            # FFT 互相关
+            corr = np.fft.irfft(np.fft.rfft(s, n + m - 1) * np.conj(np.fft.rfft(t[::-1], n + m - 1)))
+            corr = corr[:n - m + 1]  # 有效偏移
+            # 归一化：除以能量
+            # 注意：完整皮尔逊相关系数需窗口动态标准差，这里用全局近似
+            # 为提高精度，我们用局部能量修正？简化：直接比较协方差，因为降采样后信号平稳
+            # 实际效果足够找到大致位置
+            best_offset = np.argmax(corr)
+            return best_offset
+
+        offset_f = fft_argmax_offset(signal_f_ds, tpl_f_ds)
+        offset_r = fft_argmax_offset(signal_r_ds, tpl_r_ds)
+
+        # 综合两个偏移（取平均或选更可信的，这里简单平均）
+        best_offset_ds = int(round((offset_f + offset_r) / 2.0))
+
+        # 映射回原始采样间隔的偏移
+        best_offset_orig = best_offset_ds * ds_factor
+
+        # ---------- 4. 在原采样下精确搜索（仅 ±5 个采样点）----------
+        fine_window = 5  # 原采样点
+        start_idx = max(0, best_offset_orig - fine_window)
+        end_idx = min(len(signal_f) - tpl_len, best_offset_orig + fine_window)
+
+        best_combined = -1.0
+        best_shift = best_offset_orig
+        for shift in range(start_idx, end_idx + 1):
+            seg_f = signal_f[shift:shift + tpl_len]
+            seg_r = signal_r[shift:shift + tpl_len]
+            # 可能因边界造成长度不足
+            if len(seg_f) < tpl_len or len(seg_r) < tpl_len:
+                continue
+            corr_f = np.corrcoef(seg_f, tpl_f)[0, 1] if (np.std(seg_f) > 1e-6 and np.std(tpl_f) > 1e-6) else 0
+            corr_r = np.corrcoef(seg_r, tpl_r)[0, 1] if (np.std(seg_r) > 1e-6 and np.std(tpl_r) > 1e-6) else 0
+            combined = (corr_f + corr_r) / 2.0
+            if combined > best_combined:
+                best_combined = combined
+                best_shift = shift
+
+        best_start_time = search_start + best_shift * sample_interval
+        best_end_time = best_start_time + win_len
+
+        if best_combined < 0.6:
+            return rough_start, rough_end
+        return best_start_time, best_end_time
+
+    def _classify_hash_segment(self, query_hashes):
+        """根据哈希窗口的相似度归类或创建模板，返回模板ID"""
+        threshold = 0.75  # 窗口内帧汉明距离≤MAX_DIST的比例
+        max_dist = CONFIG["OPED_HASH_MAX_DIST"]
+        best_ratio = 0.0
         best_id = -1
         best_idx = -1
 
-        for idx, template in enumerate(self.oped_templates):
-            tpl_wave = np.array(template['wave'])
-            min_len = min(len(wave_feature), len(tpl_wave))
-            if min_len < 5:
+        for idx, tpl in enumerate(self.oped_templates):
+            tpl_hashes = tpl.get('hash_sequence', [])
+            if len(tpl_hashes) != len(query_hashes):
                 continue
-            corr = np.corrcoef(wave_feature[:min_len], tpl_wave[:min_len])[0, 1]
-            if corr > best_corr:
-                best_corr = corr
-                best_id = template['id']
+            similar = 0
+            for q, t in zip(query_hashes, tpl_hashes):
+                if bin(q ^ t).count('1') <= max_dist:
+                    similar += 1
+            ratio = similar / len(query_hashes)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_id = tpl['id']
                 best_idx = idx
 
-        if best_corr >= threshold:
-            # 用当前波形平滑更新模板
-            tpl_wave = np.array(self.oped_templates[best_idx]['wave'])
-            min_len = min(len(wave_feature), len(tpl_wave))
-            updated_wave = 0.7 * tpl_wave[:min_len] + 0.3 * np.array(wave_feature[:min_len])
-            self.oped_templates[best_idx]['wave'] = updated_wave.tolist()
+        if best_ratio >= threshold:
+            # 更新模板（平滑：保留原有哈希的70%，30%用新窗口）
+            updated = []
+            for q, t in zip(query_hashes, self.oped_templates[best_idx]['hash_sequence']):
+                # 简单的按位更新？可以保留原模板不动，此处仅更新比率较高的帧
+                updated.append(t)  # 暂时保持原模板不变，或根据汉明距离决定是否替换
+            # 这里可简单替换为当前窗口（如果完全匹配则更新，否则保留）
+            self.oped_templates[best_idx]['hash_sequence'] = updated
             return best_id
         else:
-            # 新建类别
             new_id = len(self.oped_templates)
             color = self.oped_color_palette[self.oped_next_color_idx % len(self.oped_color_palette)]
             self.oped_next_color_idx += 1
             self.oped_templates.append({
                 'id': new_id,
-                'wave': wave_feature,
-                'color': color
+                'hash_sequence': query_hashes.copy(),
+                'color': color,
+                'wave_filtered': [],  # 保留兼容字段，但不再使用
+                'wave_raw': []
             })
             return new_id
+
+    def _get_hash_template(self, pending_id):
+        """根据ID返回哈希序列模板"""
+        for tpl in self.oped_templates:
+            if tpl['id'] == pending_id:
+                return tpl.get('hash_sequence', [])
+        return None
+    def _calc_cels_in_interval(self, start, end):
+        """返回时间段 [start, end] 内过滤后张数的净增"""
+        history = list(self.total_history)
+        if not history:
+            return 0
+        start_cels = None
+        end_cels = None
+        for t, _, filtered, *_ in history:
+            if t <= start:
+                start_cels = filtered
+            if t >= end and end_cels is None:
+                end_cels = filtered
+        if start_cels is None:
+            start_cels = history[0][2]
+        if end_cels is None:
+            end_cels = history[-1][2]
+        return max(0, end_cels - start_cels)
+
+
+
+
     def _save_record(self):
-        """保存当前运行记录到 JSON 文件"""
+        import tkinter.messagebox as mb
         import tkinter.simpledialog as sd
         name = sd.askstring("保存记录", "输入记录名称：")
         if not name:
             return
+
+        # 计算各种统计
         net_cels = self.total_cels_count - self.oped_deducted_cels
         net_time = self.elapsed_time - self.oped_deducted_time
+
+        # 构建 OP/ED 片段明细
+        oped_segments = []
+        for start, end, sid in self.segment_occurrences:
+            # 计算该片段的实际扣除张数（可从 total_history 精确计算）
+            deducted_cels = self._calc_cels_in_interval(start, end)  # 需要实现
+            oped_segments.append({
+                "start": round(start, 2),
+                "end": round(end, 2),
+                "duration": round(end - start, 2),
+                "segment_id": sid,
+                "deducted_cels": deducted_cels,
+                "deducted_time": round(end - start, 2)
+            })
+
+
+        instant_fps_values = []
+        if hasattr(self, 'instant_fps_history') and self.instant_fps_history:
+            instant_fps_values = [v for _, v in self.instant_fps_history]
+
         record = {
             "name": name,
-            "total_cels": net_cels,
-            "total_time": net_time,
-            "avg_fps": net_cels / net_time if net_time > 0 else 0,
-            "oped_unique_cels": self.oped_deducted_cels,  # 可选：保留 OP/ED 数据
-            "oped_unique_time": self.oped_deducted_time,
-            "record_time": time.strftime("%Y-%m-%d %H:%M:%S")
+            "record_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "start_timestamp": self.start_real_time,
+            "end_timestamp": time.time(),
+            "duration_sec": round(self.elapsed_time, 2),
+            "total_raw_cels": self.total_raw_cels_count,
+            "total_filtered_cels": self.total_cels_count,
+            "filtering": {
+                "translation": self.total_translation_filtered,
+                "optical_flow": self.total_optical_flow_filtered,
+                "hash": self.total_hash_filtered,
+                "still": self.total_still_filtered,
+                "local_motion": self.total_local_filtered,
+                "zoom": self.total_zoom_filtered,
+                "other": self.total_other_unknown_filtered
+            },
+            "oped": {
+                "total_deducted_cels": self.oped_deducted_cels,
+                "total_deducted_time": round(self.oped_deducted_time, 2),
+                "segments": oped_segments
+            },
+            "avg_fps_filtered": round(net_cels / net_time, 2) if net_time > 0 else 0,
+            "avg_fps_raw": round(self.total_raw_cels_count / self.elapsed_time, 2) if self.elapsed_time > 0 else 0,
+            "extra": {
+                "max_instant_fps": round(max(instant_fps_values), 2) if instant_fps_values else 0,
+                "min_instant_fps": round(min(instant_fps_values), 2) if instant_fps_values else 0,
+                "median_fps": round(np.median(instant_fps_values), 2) if instant_fps_values else 0
+            }
         }
+
+        # 保存到文件
         settings_dir = os.path.dirname(self._get_settings_path())
         path = os.path.join(settings_dir, "cel_counter_records.json")
-
         try:
             with open(path, "r", encoding="utf-8") as f:
                 records = json.load(f)
@@ -1768,23 +1936,17 @@ class AnimeCelCounter:
         records.append(record)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(records, f, indent=2, ensure_ascii=False)
-        import tkinter.messagebox as mb
         mb.showinfo("保存成功", f"记录已保存至 {path}")
 
-    def _add_highlight_interval(self, start, end):
-        """将重复区间加入高亮列表，用于波形绘制"""
-        last = self.segment_occurrences[-1] if self.segment_occurrences else None
-        if last and abs(last[0] - start) < 0.5 and abs(last[1] - end) < 0.5:
-            return
-        self.segment_occurrences.append((start, end, 0))
 
     def _apply_oped_deduction(self, start, end):
         """计算并扣除指定 OP/ED 区间的张数和时长"""
         # 去重检查
-        for old_start, old_end in self.deducted_intervals:
-            if abs(old_start - start) < 1.0 and abs(old_end - end) < 1.0:
-                return
-        self.deducted_intervals.append((start, end))
+        with self.lock:
+            for old_start, old_end in self.deducted_intervals:
+                if abs(old_start - start) < 1.0 and abs(old_end - end) < 1.0:
+                    return
+            self.deducted_intervals.append((start, end))
 
         # 从 total_history 中提取区间内的累计张数增量
         history = list(self.total_history)

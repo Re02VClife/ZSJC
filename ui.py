@@ -1,10 +1,9 @@
 # ui.py
 import tkinter as tk
-import json
-import os
-import sys
-from config import CONFIG, CONFIG_DEFAULT, color_manager
+
+from config import CONFIG, color_manager
 from widgets import DraggablePanel
+
 
 def build_main_ui(master, counter):
     """

@@ -122,10 +122,15 @@ CONFIG = {
     # OP/ED 检测
     "OPED_DETECTION_ENABLED": True,      # 是否启用
     "OPED_WINDOW_SEC": 90,              # 匹配窗口长度（秒）
-    "OPED_MATCH_THRESHOLD": 0.95,       # 相关系数阈值
+    "OPED_MATCH_THRESHOLD": 0.9,       # 相关系数阈值
     "OPED_HISTORY_HOURS": 4,           # 历史波形最长保存小时
     "OPED_SAMPLE_INTERVAL_SEC": 1,    # 历史采样间隔（秒）
-
+    "OPED_CLASSIFY_THRESHOLD": 0.8,   # 归类阈值（平均相关系数）
+    # OP/ED 图像哈希匹配参数
+    "OPED_HASH_ENABLED": True,
+    "OPED_HASH_SIZE": 8,  # 新哈希内部 8x8，这里可忽略，或用于兼容
+    "OPED_HASH_MAX_DIST": 12,  # 允许最大汉明距离
+    "OPED_HASH_WIN_RATIO": 0.6,  # 可适当提高窗口相似帧占比要求
     # ========== 颜色方案 ==========
     "COLORS": {
         "accent": "#E6397C",
