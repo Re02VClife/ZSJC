@@ -1,9 +1,8 @@
 # ui.py
 import tkinter as tk
-
-from config import CONFIG, color_manager
+from config import CONFIG, color_manager, CONFIG_DEFAULT, get_settings_path
 from widgets import DraggablePanel
-
+import copy, json, os
 
 def build_main_ui(master, counter):
     """
@@ -92,8 +91,7 @@ def create_settings_window(parent, counter):
             counter.settings_canvas.unbind_all("<MouseWheel>")
         counter._settings_win = None
         counter.settings_wave_canvas = None
-        # 修复这一行
-        counter.preview_manager.stop()  # 原来为 counter._stop_preview()
+        counter.preview_manager.stop()
         if hasattr(counter, '_crop_window') and counter._crop_window:
             counter._crop_window.destroy()
         win.destroy()
@@ -190,25 +188,25 @@ def create_settings_window(parent, counter):
                    command=lambda: counter._on_preview_toggle(preview_toggle_var.get())
                    ).pack(side="left", padx=3)
 
-    show_dense_var = tk.BooleanVar(value=True)
+    show_dense_var = tk.BooleanVar(value=counter.preview_manager.show_dense)
     tk.Checkbutton(control_bar, text="稠密光流", variable=show_dense_var,
                    fg=accent, bg=bg, selectcolor="#222222",
                    command=lambda: setattr(counter.preview_manager, 'show_dense', show_dense_var.get())
                    ).pack(side="left", padx=3)
 
-    show_sparse_var = tk.BooleanVar(value=True)
+    show_sparse_var = tk.BooleanVar(value=counter.preview_manager.show_sparse)
     tk.Checkbutton(control_bar, text="稀疏光流", variable=show_sparse_var,
                    fg=accent, bg=bg, selectcolor="#222222",
                    command=lambda: setattr(counter.preview_manager, 'show_sparse', show_sparse_var.get())
                    ).pack(side="left", padx=3)
 
-    show_curr_var = tk.BooleanVar(value=True)
+    show_curr_var = tk.BooleanVar(value=counter.preview_manager.show_curr)
     tk.Checkbutton(control_bar, text="当前帧", variable=show_curr_var,
                    fg=accent, bg=bg, selectcolor="#222222",
                    command=lambda: setattr(counter.preview_manager, 'show_curr', show_curr_var.get())
                    ).pack(side="left", padx=3)
 
-    show_diff_var = tk.BooleanVar(value=True)
+    show_diff_var = tk.BooleanVar(value=counter.preview_manager.show_diff)
     tk.Checkbutton(control_bar, text="差分", variable=show_diff_var,
                    fg=accent, bg=bg, selectcolor="#222222",
                    command=lambda: setattr(counter.preview_manager, 'show_diff', show_diff_var.get())

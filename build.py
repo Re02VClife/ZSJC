@@ -7,6 +7,8 @@ module_files = [
     'widgets.py',
     'detection.py',
     'preview.py',
+    'oped_detector.py',
+    'record_manager.py',
     'ui.py',
     'main.py'
 ]

@@ -62,8 +62,8 @@ CONFIG = {
     "WAVE2_REFRESH_MS": 3000,           # 波形2刷新间隔（毫秒）
     "JingzhiShiJian": 60,               # 静止自动暂停（秒）
     "WAVE_MAX_Y": 24,                   # 波形Y轴最大值（张/秒）
-    "CROP_RATIO": 0.7,                  # 截取屏幕中心区域比例
-    "CROP_REGION": None,                # 手动截图区域（left, top, right, bottom），None则自动计算
+    "CROP_RATIO": 0.8,                  # 截取屏幕中心区域比例
+    "CROP_REGION": [100,120,1800,1000], # 手动截图区域（left, top, right, bottom），None则自动计算
     "ALPHA": 1,                         # 窗口透明度（0.0~1.0）
 
 
@@ -131,6 +131,14 @@ CONFIG = {
     "OPED_HASH_SIZE": 8,  # 新哈希内部 8x8，这里可忽略，或用于兼容
     "OPED_HASH_MAX_DIST": 12,  # 允许最大汉明距离
     "OPED_HASH_WIN_RATIO": 0.6,  # 可适当提高窗口相似帧占比要求
+
+    # === 新增：帧级实时匹配参数 ===
+    "OPED_ENTER_HAMMING": 5,  # 进入匹配的汉明距离上限
+    "OPED_EXIT_HAMMING": 15,  # 退出判定距离下限
+    "OPED_ENTER_CONSEC": 3,  # 连续匹配帧数（进入）
+    "OPED_EXIT_CONSEC": 3,  # 连续不匹配帧数（退出）
+    "OPED_MIN_DURATION": 30,  # 最小区间长度（秒），短于此刻丢弃
+    "OPED_SELF_EXCLUDE_SEC": 90,  # 自排除窗口（秒），不与此时间内历史比较
     # ========== 颜色方案 ==========
     "COLORS": {
         "accent": "#E6397C",

@@ -1,37 +1,19 @@
 [
   {
-    "name": "阿迪斯",
-    "total_cels": 3772,
-    "total_time": 575.3417913913727,
-    "avg_fps": 6.556102922539344,
-    "oped_unique_cels": 0,
-    "oped_unique_time": 0.0,
-    "record_time": "2026-06-05 19:15:32"
-  },
-  {
-    "name": "aaa",
-    "total_cels": 10406,
-    "total_time": 1672.701737165451,
-    "avg_fps": 6.22107323068483,
-    "oped_unique_cels": 0,
-    "oped_unique_time": 0.0,
-    "record_time": "2026-06-05 21:49:19"
-  },
-  {
-    "name": "DD",
-    "record_time": "2026-06-05 23:34:46",
-    "start_timestamp": 1780671756.732344,
-    "end_timestamp": 1780673686.4057322,
-    "duration_sec": 1888.83,
-    "total_raw_cels": 17776,
-    "total_filtered_cels": 9881,
+    "name": "亚托莉",
+    "record_time": "2026-06-06 21:44:11",
+    "start_timestamp": 1780728691.6190054,
+    "end_timestamp": 1780753451.0917897,
+    "duration_sec": 19132.74,
+    "total_raw_cels": 147748,
+    "total_filtered_cels": 67531,
     "filtering": {
-      "translation": 2177,
-      "optical_flow": 740,
-      "hash": 1690,
-      "still": 318,
-      "local_motion": 2708,
-      "zoom": 272,
+      "translation": 24428,
+      "optical_flow": 10132,
+      "hash": 6713,
+      "still": 4411,
+      "local_motion": 33151,
+      "zoom": 1514,
       "other": 0
     },
     "oped": {
@@ -39,38 +21,262 @@
       "total_deducted_time": 0.0,
       "segments": [
         {
-          "start": 1752.91,
-          "end": 1799.93,
-          "duration": 47.02,
+          "start": 2997.67,
+          "end": 3115.67,
+          "duration": 117.99,
           "segment_id": 0,
-          "deducted_cels": 427,
-          "deducted_time": 47.02
+          "deducted_cels": 0,
+          "deducted_time": 117.99
+        },
+        {
+          "start": 4182.99,
+          "end": 4371.81,
+          "duration": 188.82,
+          "segment_id": 1,
+          "deducted_cels": 0,
+          "deducted_time": 188.82
+        },
+        {
+          "start": 4384.96,
+          "end": 4541.42,
+          "duration": 156.45,
+          "segment_id": 2,
+          "deducted_cels": 0,
+          "deducted_time": 156.45
+        },
+        {
+          "start": 5604.26,
+          "end": 5799.41,
+          "duration": 195.15,
+          "segment_id": 3,
+          "deducted_cels": 0,
+          "deducted_time": 195.15
+        },
+        {
+          "start": 5789.3,
+          "end": 5984.48,
+          "duration": 195.18,
+          "segment_id": 4,
+          "deducted_cels": 0,
+          "deducted_time": 195.18
+        },
+        {
+          "start": 7021.02,
+          "end": 7220.23,
+          "duration": 199.21,
+          "segment_id": 5,
+          "deducted_cels": 0,
+          "deducted_time": 199.21
+        },
+        {
+          "start": 7230.44,
+          "end": 7427.9,
+          "duration": 197.46,
+          "segment_id": 6,
+          "deducted_cels": 0,
+          "deducted_time": 197.46
+        },
+        {
+          "start": 8575.37,
+          "end": 8678.38,
+          "duration": 103.01,
+          "segment_id": 7,
+          "deducted_cels": 0,
+          "deducted_time": 103.01
+        },
+        {
+          "start": 8610.05,
+          "end": 8771.09,
+          "duration": 161.04,
+          "segment_id": 8,
+          "deducted_cels": 0,
+          "deducted_time": 161.04
+        },
+        {
+          "start": 8690.55,
+          "end": 8833.18,
+          "duration": 142.63,
+          "segment_id": 9,
+          "deducted_cels": 0,
+          "deducted_time": 142.63
+        },
+        {
+          "start": 9861.58,
+          "end": 10047.32,
+          "duration": 185.74,
+          "segment_id": 10,
+          "deducted_cels": 0,
+          "deducted_time": 185.74
+        },
+        {
+          "start": 9964.7,
+          "end": 10208.21,
+          "duration": 243.51,
+          "segment_id": 11,
+          "deducted_cels": 0,
+          "deducted_time": 243.51
+        },
+        {
+          "start": 11097.97,
+          "end": 11311.98,
+          "duration": 214.01,
+          "segment_id": 12,
+          "deducted_cels": 0,
+          "deducted_time": 214.01
+        },
+        {
+          "start": 11281.46,
+          "end": 11478.99,
+          "duration": 197.53,
+          "segment_id": 13,
+          "deducted_cels": 0,
+          "deducted_time": 197.53
+        },
+        {
+          "start": 11476.97,
+          "end": 11892.14,
+          "duration": 415.18,
+          "segment_id": 14,
+          "deducted_cels": 0,
+          "deducted_time": 415.18
+        },
+        {
+          "start": 12377.0,
+          "end": 12552.07,
+          "duration": 175.07,
+          "segment_id": 15,
+          "deducted_cels": 0,
+          "deducted_time": 175.07
+        },
+        {
+          "start": 12511.56,
+          "end": 13507.64,
+          "duration": 996.08,
+          "segment_id": 16,
+          "deducted_cels": 2548,
+          "deducted_time": 996.08
+        },
+        {
+          "start": 14223.75,
+          "end": 14380.17,
+          "duration": 156.42,
+          "segment_id": 17,
+          "deducted_cels": 351,
+          "deducted_time": 156.42
+        },
+        {
+          "start": 14382.22,
+          "end": 14614.42,
+          "duration": 232.2,
+          "segment_id": 18,
+          "deducted_cels": 829,
+          "deducted_time": 232.2
+        },
+        {
+          "start": 14551.6,
+          "end": 14765.24,
+          "duration": 213.65,
+          "segment_id": 19,
+          "deducted_cels": 986,
+          "deducted_time": 213.65
+        },
+        {
+          "start": 15290.41,
+          "end": 15438.49,
+          "duration": 148.08,
+          "segment_id": 20,
+          "deducted_cels": 299,
+          "deducted_time": 148.08
+        },
+        {
+          "start": 15826.95,
+          "end": 16032.34,
+          "duration": 205.38,
+          "segment_id": 21,
+          "deducted_cels": 673,
+          "deducted_time": 205.38
+        },
+        {
+          "start": 16050.61,
+          "end": 16241.6,
+          "duration": 190.99,
+          "segment_id": 22,
+          "deducted_cels": 781,
+          "deducted_time": 190.99
+        },
+        {
+          "start": 16730.25,
+          "end": 16858.6,
+          "duration": 128.35,
+          "segment_id": 23,
+          "deducted_cels": 407,
+          "deducted_time": 128.35
+        },
+        {
+          "start": 17316.33,
+          "end": 17511.72,
+          "duration": 195.39,
+          "segment_id": 24,
+          "deducted_cels": 639,
+          "deducted_time": 195.39
+        },
+        {
+          "start": 17542.22,
+          "end": 17723.2,
+          "duration": 180.98,
+          "segment_id": 25,
+          "deducted_cels": 898,
+          "deducted_time": 180.98
+        },
+        {
+          "start": 18891.29,
+          "end": 18990.18,
+          "duration": 98.89,
+          "segment_id": 26,
+          "deducted_cels": 310,
+          "deducted_time": 98.89
+        },
+        {
+          "start": 18905.58,
+          "end": 19080.54,
+          "duration": 174.96,
+          "segment_id": 27,
+          "deducted_cels": 720,
+          "deducted_time": 174.96
+        },
+        {
+          "start": 18995.25,
+          "end": 19092.77,
+          "duration": 97.52,
+          "segment_id": 28,
+          "deducted_cels": 560,
+          "deducted_time": 97.52
         }
       ]
     },
-    "avg_fps_filtered": 5.23,
-    "avg_fps_raw": 9.41,
+    "avg_fps_filtered": 3.53,
+    "avg_fps_raw": 7.72,
     "extra": {
-      "max_instant_fps": 25.51,
+      "max_instant_fps": 1000.0,
       "min_instant_fps": 0.0,
-      "median_fps": 4.09
+      "median_fps": 1.04
     }
   },
   {
-    "name": "6",
-    "record_time": "2026-06-06 07:49:59",
-    "start_timestamp": 1780686020.6460721,
-    "end_timestamp": 1780703399.7543545,
-    "duration_sec": 17308.61,
-    "total_raw_cels": 159227,
-    "total_filtered_cels": 82001,
+    "name": "1",
+    "record_time": "2026-06-07 11:46:09",
+    "start_timestamp": 1780803863.716077,
+    "end_timestamp": 1780803969.5362413,
+    "duration_sec": 60.23,
+    "total_raw_cels": 978,
+    "total_filtered_cels": 465,
     "filtering": {
-      "translation": 26102,
-      "optical_flow": 6195,
-      "hash": 15095,
-      "still": 3402,
-      "local_motion": 24853,
-      "zoom": 1720,
+      "translation": 28,
+      "optical_flow": 257,
+      "hash": 27,
+      "still": 0,
+      "local_motion": 203,
+      "zoom": 0,
       "other": 0
     },
     "oped": {
@@ -78,29 +284,29 @@
       "total_deducted_time": 0.0,
       "segments": []
     },
-    "avg_fps_filtered": 4.74,
-    "avg_fps_raw": 9.2,
+    "avg_fps_filtered": 7.72,
+    "avg_fps_raw": 16.24,
     "extra": {
-      "max_instant_fps": 25.47,
+      "max_instant_fps": 25.12,
       "min_instant_fps": 0.0,
-      "median_fps": 3.1
+      "median_fps": 8.02
     }
   },
   {
-    "name": "aaaa",
-    "record_time": "2026-06-06 11:14:09",
-    "start_timestamp": 1780714817.5648425,
-    "end_timestamp": 1780715649.9982655,
-    "duration_sec": 819.19,
-    "total_raw_cels": 12167,
-    "total_filtered_cels": 7199,
+    "name": "A",
+    "record_time": "2026-06-07 13:30:19",
+    "start_timestamp": 1780804774.3204124,
+    "end_timestamp": 1780810219.4600399,
+    "duration_sec": 5321.19,
+    "total_raw_cels": 72516,
+    "total_filtered_cels": 46797,
     "filtering": {
-      "translation": 2260,
-      "optical_flow": 659,
-      "hash": 0,
-      "still": 168,
-      "local_motion": 1696,
-      "zoom": 210,
+      "translation": 126,
+      "optical_flow": 5005,
+      "hash": 3778,
+      "still": 1156,
+      "local_motion": 12837,
+      "zoom": 2829,
       "other": 0
     },
     "oped": {
@@ -109,41 +315,11 @@
       "segments": []
     },
     "avg_fps_filtered": 8.79,
-    "avg_fps_raw": 14.85,
+    "avg_fps_raw": 13.63,
     "extra": {
-      "max_instant_fps": 25.54,
+      "max_instant_fps": 27.64,
       "min_instant_fps": 0.0,
-      "median_fps": 6.25
-    }
-  },
-  {
-    "name": "adsz",
-    "record_time": "2026-06-06 11:30:50",
-    "start_timestamp": 1780716087.4839988,
-    "end_timestamp": 1780716650.8772333,
-    "duration_sec": 563.37,
-    "total_raw_cels": 6834,
-    "total_filtered_cels": 3794,
-    "filtering": {
-      "translation": 559,
-      "optical_flow": 167,
-      "hash": 324,
-      "still": 106,
-      "local_motion": 1657,
-      "zoom": 234,
-      "other": 0
-    },
-    "oped": {
-      "total_deducted_cels": 0,
-      "total_deducted_time": 0.0,
-      "segments": []
-    },
-    "avg_fps_filtered": 6.73,
-    "avg_fps_raw": 12.13,
-    "extra": {
-      "max_instant_fps": 25.47,
-      "min_instant_fps": 0.0,
-      "median_fps": 5.14
+      "median_fps": 1.06
     }
   }
 ]
