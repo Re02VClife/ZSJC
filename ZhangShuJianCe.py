@@ -79,7 +79,7 @@ CONFIG = {
     "SHOW_WAVE2": True,                 # 显示波形2
     "REFRESH_INTERVAL": 0.4,            # UI 标签刷新间隔（秒）
     "SCALE_FACTOR": 0.5,                # 截图缩放比例
-    "SSIM_THRESHOLD": 0.90,             # 背景相似度阈值（用于局部变化过滤）
+    "SSIM_THRESHOLD": 0.95,             # 背景相似度阈值（高于阈值则过滤）
     "WAVE_HISTORY_SEC": 60,             # 波形1历史时长（秒）
     "WAVE_REFRESH_MS": 200,             # 波形1刷新间隔（毫秒）
     "WAVE2_HISTORY_SEC": 1500,          # 波形2历史时长（秒）
