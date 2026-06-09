@@ -1,9 +1,8 @@
 # ui.py
 import tkinter as tk
-from config import CONFIG, color_manager, CONFIG_DEFAULT, get_settings_path
-from widgets import DraggablePanel
 import copy, json, os
-
+from config import color_manager, CONFIG
+from widgets import DraggablePanel
 def build_main_ui(master, counter):
     """
     构建主界面，返回一个包含所有引用控件的字典。
@@ -60,11 +59,71 @@ def build_main_ui(master, counter):
     ui['canvas1'] = canvas1
     ui['canvas2'] = canvas2
     ui['btn_canvas'] = btn_canvas
+    ui['main_frame'] = main_frame
     return ui
+
+
+def create_video_controls(parent, counter):
+    """
+    创建视频播放控制条（进度条、播放/暂停、倍速等），返回控件字典。
+    仅在视频模式下显示，放在主窗口底部。
+    """
+    accent = color_manager.get_color('accent')
+    bg = color_manager.get_color('bg')
+    btn_bg = color_manager.get_color('btn_bg')
+
+    frame = tk.Frame(parent, bg=bg, height=30)
+    # 初始隐藏
+    frame.pack_forget()
+
+    # 进度条
+    progress_var = tk.DoubleVar()
+    progress_scale = tk.Scale(frame, from_=0, to=100, orient=tk.HORIZONTAL,
+                              variable=progress_var, showvalue=False, bg=bg,
+                              fg=accent, troughcolor=btn_bg, highlightthickness=0,
+                              command=lambda v: counter._on_seek(float(v)))
+    progress_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+    # 时间标签
+    time_label = tk.Label(frame, text="00:00/00:00", fg=accent, bg=bg, font=("Arial", 9))
+    time_label.pack(side=tk.LEFT, padx=5)
+
+    # 播放/暂停按钮
+    play_var = tk.BooleanVar(value=True)
+    def toggle_play():
+        if play_var.get():
+            counter.pause_video()
+            play_btn.config(text="▶")
+        else:
+            counter.resume_video()
+            play_btn.config(text="⏸")
+        play_var.set(not play_var.get())
+    play_btn = tk.Button(frame, text="⏸", command=toggle_play, bg=btn_bg, fg=accent,
+                         bd=0, font=("Arial", 10), width=3)
+    play_btn.pack(side=tk.LEFT, padx=2)
+
+    # 倍速选择
+    speed_var = tk.StringVar(value="1.0x")
+    speed_menu = tk.OptionMenu(frame, speed_var, "0.5x", "1.0x", "1.5x", "2.0x",
+                               command=lambda v: counter._on_speed_change(v))
+    speed_menu.config(bg=btn_bg, fg=accent, highlightthickness=0)
+    speed_menu.pack(side=tk.LEFT, padx=5)
+
+    controls = {
+        'frame': frame,
+        'progress_var': progress_var,
+        'time_label': time_label,
+        'play_btn': play_btn,
+        'play_var': play_var,
+        'speed_var': speed_var,
+    }
+    return controls
+
 
 def create_settings_window(parent, counter):
     """
     创建并返回设置窗口，内部绑定所有控件和回调。
+    （保持原有结构，仅增加视频/GPU相关选项）
     """
     win = tk.Toplevel(parent)
     win.title("参数设置")
@@ -100,8 +159,6 @@ def create_settings_window(parent, counter):
     bg = color_manager.get_color('bg')
     title_bg = color_manager.get_color('title_bg')
     btn_bg = color_manager.get_color('btn_bg')
-
-
 
     title_bar = tk.Frame(win, bg=title_bg, height=30, cursor="fleur")
     title_bar.pack(fill=tk.X)
@@ -165,18 +222,15 @@ def create_settings_window(parent, counter):
     resize_handle.bind("<B1-Motion>", do_resize)
 
     panels = {}
-    # 参数面板
     param_panel = DraggablePanel(main_frame, "参数设置", 400, 650)
     panels['params'] = param_panel
     counter.param_entries = counter._build_params_content(param_panel.content, win, panels)
 
-    # 总张数波形面板
     wave_panel = DraggablePanel(main_frame, "总张数波形", 600, 400)
     panels['wave'] = wave_panel
     counter.settings_wave_canvas = tk.Canvas(wave_panel.content, bg=bg, highlightthickness=0)
     counter.settings_wave_canvas.pack(fill=tk.BOTH, expand=True)
 
-    # 实时预览面板
     preview_panel = DraggablePanel(main_frame, "实时预览", 600, 400)
     panels['preview'] = preview_panel
     control_bar = tk.Frame(preview_panel.content, bg=bg)
@@ -252,6 +306,42 @@ def create_settings_window(parent, counter):
     lock_check.pack(side=tk.RIGHT, padx=10)
     toggle_lock()
 
+    # ========== 新增：视频模式 & GPU 设置组 ==========
+    video_group = tk.LabelFrame(param_panel.content, text="视频模式 & GPU", fg=accent, bg=bg, font=("Arial", 9, "bold"))
+    video_group.pack(fill="x", padx=5, pady=5)
+
+    # GPU 加速开关
+    gpu_var = tk.BooleanVar(value=CONFIG.get("GPU_ENABLED", False))
+    tk.Checkbutton(video_group, text="启用 GPU 加速 (需 OpenCV CUDA)", variable=gpu_var,
+                   fg=accent, bg=bg, selectcolor=btn_bg).pack(anchor="w", padx=5, pady=2)
+
+    # 视频播放速度
+    speed_label = tk.Label(video_group, text="默认播放速度:", fg=accent, bg=bg)
+    speed_label.pack(side="left", padx=5)
+    speed_entry_var = tk.StringVar(value=str(CONFIG.get("VIDEO_PLAYBACK_SPEED", 1.0)))
+    speed_entry = tk.Entry(video_group, textvariable=speed_entry_var, width=5,
+                           bg=btn_bg, fg=accent)
+    speed_entry.pack(side="left", padx=2)
+
+    # 保存时同步这些新配置项
+    def save_settings():
+        # 原有保存逻辑在 counter._build_params_content 的 save_settings 中定义，
+        # 这里额外保存 GPU 和速度设置
+        CONFIG["GPU_ENABLED"] = gpu_var.get()
+        try:
+            CONFIG["VIDEO_PLAYBACK_SPEED"] = float(speed_entry_var.get())
+        except:
+            pass
+        # 调用 counter 原有的保存设置函数（需确保 counter.param_entries 的保存逻辑被触发）
+        # 由于我们不在这个闭包内直接访问 counter._build_params_content 中的变量，
+        # 需要通过 counter 的方法来保存。简便做法：在 counter 中提供专门的保存方法。
+        counter._save_gpu_video_config(gpu_var.get(), speed_entry_var.get())
+        # 同时调用 save_settings 触发原有逻辑（假设 counter 有该方法）
+
+
+    tk.Button(video_group, text="应用视频设置", command=save_settings,
+              bg=btn_bg, fg=accent).pack(pady=5)
+
     win.update_idletasks()
     # 自动开启预览
     preview_toggle_var.set(True)
@@ -262,7 +352,6 @@ def create_settings_window(parent, counter):
     win.after(100, counter._draw_settings_wave)
     win.protocol("WM_DELETE_WINDOW", on_close)
     return win
-
 def create_crop_window(counter):
     """创建全屏截图范围调整窗口"""
     if hasattr(counter, '_crop_window') and counter._crop_window is not None:

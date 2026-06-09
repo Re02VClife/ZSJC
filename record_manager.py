@@ -43,7 +43,8 @@ class RecordManager:
         counter = self.counter
         oped = counter.oped_detector
         net_cels = counter.total_cels_count - oped.deducted_cels
-        net_time = counter.elapsed_time - oped.deducted_time
+        current_clock = getattr(counter, '_current_clock', counter.elapsed_time)
+        net_time = current_clock - oped.deducted_time
 
         oped_segments = []
         for start, end, sid in oped.segment_occurrences:
@@ -57,7 +58,7 @@ class RecordManager:
             "record_time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "start_timestamp": counter.start_real_time,
             "end_timestamp": time.time(),
-            "duration_sec": round(counter.elapsed_time, 2),
+            "duration_sec": round(current_clock, 2),
             "total_raw_cels": counter.total_raw_cels_count,
             "total_filtered_cels": counter.total_cels_count,
             "filtering": {"translation": counter.total_translation_filtered,"optical_flow": counter.total_optical_flow_filtered,"hash": counter.total_hash_filtered,"still": counter.total_still_filtered,"local_motion": counter.total_local_filtered,"zoom": counter.total_zoom_filtered,"other": counter.total_other_unknown_filtered},
@@ -67,7 +68,7 @@ class RecordManager:
                 "segments": oped_segments
             },
             "avg_fps_filtered": round(net_cels / net_time, 2) if net_time > 0 else 0,
-            "avg_fps_raw": round(counter.total_raw_cels_count / counter.elapsed_time, 2) if counter.elapsed_time > 0 else 0,
+            "avg_fps_raw": round(counter.total_raw_cels_count / current_clock, 2) if current_clock > 0 else 0,
             "extra": {
                 "max_instant_fps": round(max(instant_fps_values), 2) if instant_fps_values else 0,
                 "min_instant_fps": round(min(instant_fps_values), 2) if instant_fps_values else 0,

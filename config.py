@@ -47,7 +47,7 @@ color_manager = None
 
 # ==================== 配置参数 ====================
 CONFIG = {
-    "USE_CUSTOM_COLORS": True,
+
 
     # ========== 基本显示与控制 ==========
     "SHOW_INFO_PANEL": True,            # 显示实时数据面板
@@ -139,6 +139,15 @@ CONFIG = {
     "OPED_EXIT_CONSEC": 3,  # 连续不匹配帧数（退出）
     "OPED_MIN_DURATION": 30,  # 最小区间长度（秒），短于此刻丢弃
     "OPED_SELF_EXCLUDE_SEC": 90,  # 自排除窗口（秒），不与此时间内历史比较
+    # ========== 视频文件模式 ==========
+    "VIDEO_MODE": False,                  # 当前是否为视频文件模式（运行时动态设置，不必持久化）
+    "VIDEO_FILE_PATH": "",                # 上次打开的视频文件路径
+    "VIDEO_PLAYBACK_SPEED": 1.0,          # 倍速播放（1.0=原速）
+    "VIDEO_SEEK_ENABLED": True,           # 允许拖拽进度条
+
+    # ========== GPU 加速 ==========
+    "GPU_ENABLED": False,                 # 是否启用 GPU 加速（需 OpenCV CUDA）
+    "GPU_FORCE_FALLBACK": False,         # 即使检测到 GPU 也强制使用 CPU（用于测试）
     # ========== 颜色方案 ==========
     "COLORS": {
         "accent": "#E6397C",

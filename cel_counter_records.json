@@ -321,5 +321,112 @@
       "min_instant_fps": 0.0,
       "median_fps": 1.06
     }
+  },
+  {
+    "name": "天气之子前1h",
+    "record_time": "2026-06-07 20:44:14",
+    "start_timestamp": 1780832594.7452626,
+    "end_timestamp": 1780836254.3992052,
+    "duration_sec": 3637.01,
+    "total_raw_cels": 44805,
+    "total_filtered_cels": 20888,
+    "filtering": {
+      "translation": 4740,
+      "optical_flow": 2999,
+      "hash": 2795,
+      "still": 1248,
+      "local_motion": 11256,
+      "zoom": 883,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 0,
+      "total_deducted_time": 0.0,
+      "segments": []
+    },
+    "avg_fps_filtered": 5.74,
+    "avg_fps_raw": 12.32,
+    "extra": {
+      "max_instant_fps": 25.36,
+      "min_instant_fps": 0.0,
+      "median_fps": 1.04
+    }
+  },
+  {
+    "name": "机甲大师",
+    "record_time": "2026-06-08 07:47:33",
+    "start_timestamp": 1780854492.75556,
+    "end_timestamp": 1780876053.1760159,
+    "duration_sec": 8986.41,
+    "total_raw_cels": 87576,
+    "total_filtered_cels": 39104,
+    "filtering": {
+      "translation": 14610,
+      "optical_flow": 7961,
+      "hash": 5087,
+      "still": 2724,
+      "local_motion": 15867,
+      "zoom": 2282,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 351,
+      "total_deducted_time": 89.45,
+      "segments": [
+        {
+          "start": 5967.14,
+          "end": 6017.42,
+          "duration": 50.28,
+          "segment_id": 0,
+          "deducted_cels": 180,
+          "deducted_time": 50.28
+        },
+        {
+          "start": 7458.38,
+          "end": 7497.55,
+          "duration": 39.17,
+          "segment_id": 1,
+          "deducted_cels": 171,
+          "deducted_time": 39.17
+        }
+      ]
+    },
+    "avg_fps_filtered": 4.36,
+    "avg_fps_raw": 9.75,
+    "extra": {
+      "max_instant_fps": 2.22,
+      "min_instant_fps": 0.0,
+      "median_fps": 0.0
+    }
+  },
+  {
+    "name": "朋妹烦",
+    "record_time": "2026-06-08 12:15:36",
+    "start_timestamp": 1780877370.198274,
+    "end_timestamp": 1780892136.3003592,
+    "duration_sec": 9530.41,
+    "total_raw_cels": 124698,
+    "total_filtered_cels": 47988,
+    "filtering": {
+      "translation": 36849,
+      "optical_flow": 5816,
+      "hash": 14620,
+      "still": 4508,
+      "local_motion": 13842,
+      "zoom": 1135,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 0,
+      "total_deducted_time": 0.0,
+      "segments": []
+    },
+    "avg_fps_filtered": 5.04,
+    "avg_fps_raw": 13.08,
+    "extra": {
+      "max_instant_fps": 9.83,
+      "min_instant_fps": 0.0,
+      "median_fps": 8.92
+    }
   }
 ]

@@ -8,7 +8,11 @@
 import cv2
 import numpy as np
 from config import CONFIG
-
+try:
+    import cv2.cuda
+    CUDA_AVAILABLE = True
+except ImportError:
+    CUDA_AVAILABLE = False
 # ======================== 基本工具 ========================
 
 def compute_hash(gray_img):
@@ -138,15 +142,14 @@ def has_local_motion(binary_mask):
 
 # ======================== 统一运动分析（一次角点，两次光流） ========================
 
-def unified_motion_analysis(prev, curr, use_optical_flow=True):
+def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False):
     """
-    一次角点提取 + 两次光流追踪，同时完成：
-      - 全局平移估计（返回对齐帧）
-      - 图层分离运镜检测
-      - 缩放运镜检测
+    统一运动分析，支持 GPU 加速（仅光流部分）。
+    若 use_gpu=True 且 CUDA 可用，则使用 cv2.cuda 接口。
     返回: (has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom)
     """
     max_corners = 200
+    # 角点检测仍在 CPU 上执行（GPU 版 goodFeaturesToTrack 存在但较复杂，暂用 CPU）
     corners = cv2.goodFeaturesToTrack(
         prev,
         maxCorners=max_corners,
@@ -155,7 +158,6 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True):
         mask=None
     )
 
-    # 默认值
     has_shift = False
     dx, dy = 0.0, 0.0
     curr_aligned = curr
@@ -167,8 +169,30 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True):
 
     p1 = np.float32(corners).reshape(-1, 2)
 
-    # 第一次追踪：prev -> curr，估计全局平移
-    p2_curr, status_curr, _ = cv2.calcOpticalFlowPyrLK(prev, curr, p1, None)
+    # 尝试使用 GPU 光流
+    gpu_available = False
+    if use_gpu:
+        try:
+            gpu_prev = cv2.cuda_GpuMat()
+            gpu_curr = cv2.cuda_GpuMat()
+            gpu_prev.upload(prev)
+            gpu_curr.upload(curr)
+            gpu_p1 = cv2.cuda_GpuMat()
+            gpu_p1.upload(p1)
+            # 注意：CUDA 的 PyrLK 参数略有不同，需要创建光流对象
+            lk = cv2.cuda.SparsePyrLKOpticalFlow.create(
+                winSize=(21, 21), maxLevel=3, iters=30)
+            gpu_p2, gpu_status, _ = lk.calc(gpu_prev, gpu_curr, gpu_p1)
+            p2_curr = gpu_p2.download()
+            status_curr = gpu_status.download()
+            gpu_available = True
+        except Exception as e:
+            # 回退到 CPU
+            gpu_available = False
+
+    if not gpu_available:
+        p2_curr, status_curr, _ = cv2.calcOpticalFlowPyrLK(prev, curr, p1, None)
+
     if p2_curr is not None and np.sum(status_curr) >= 20:
         valid = status_curr.flatten() == 1
         vecs_curr = p2_curr[valid] - p1[valid]
@@ -182,15 +206,26 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True):
     if not use_optical_flow:
         return has_shift, dx, dy, curr_aligned, False, False
 
-    # 第二次追踪：prev -> curr_aligned，分析残余运动（图层分离 + 缩放）
-    p2_aligned, status_aligned, _ = cv2.calcOpticalFlowPyrLK(prev, curr_aligned, p1, None)
+    # 第二次追踪：prev -> curr_aligned，分析残余运动
+    if gpu_available:
+        try:
+            gpu_aligned = cv2.cuda_GpuMat()
+            gpu_aligned.upload(curr_aligned)
+            gpu_p2_aligned, gpu_status_aligned, _ = lk.calc(gpu_prev, gpu_aligned, gpu_p1)
+            p2_aligned = gpu_p2_aligned.download()
+            status_aligned = gpu_status_aligned.download()
+        except:
+            p2_aligned, status_aligned, _ = cv2.calcOpticalFlowPyrLK(prev, curr_aligned, p1, None)
+    else:
+        p2_aligned, status_aligned, _ = cv2.calcOpticalFlowPyrLK(prev, curr_aligned, p1, None)
+
     if p2_aligned is not None and np.sum(status_aligned) >= 20:
         valid = status_aligned.flatten() == 1
         vecs_res = p2_aligned[valid] - p1[valid]
         pts = p1[valid]
         norms_res = np.linalg.norm(vecs_res, axis=1)
 
-        # ----- 图层分离检测 -----
+        # 图层分离检测 (逻辑不变)
         moving_mask = norms_res > CONFIG["FLOW_LAYER_STATIC_THRESH"]
         if np.sum(moving_mask) >= CONFIG["LAYER_MIN_MOVING_POINTS"]:
             moving_vecs = vecs_res[moving_mask]
@@ -203,7 +238,7 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True):
                 if consistency > CONFIG["LAYER_DIRECTION_CONSISTENCY"]:
                     is_layer_move = True
 
-        # ----- 缩放检测 -----
+        # 缩放检测 (逻辑不变)
         h, w = prev.shape
         center = np.array([w/2, h/2])
         radial_vecs = pts - center
@@ -218,13 +253,11 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True):
                 radial_n_f = radial_norms[final_mask]
                 vec_n_f = norms_res[final_mask]
 
-                # 方向径向一致性
                 radial_unit = radial_f / (radial_n_f[:, np.newaxis] + 1e-8)
                 vec_unit = vecs_f / (vec_n_f[:, np.newaxis] + 1e-8)
                 cos_sim_rad = np.abs(np.sum(vec_unit * radial_unit, axis=1))
                 consistency_rad = np.mean(cos_sim_rad > 0.85)
 
-                # 位移大小与距离中心的相关性
                 if consistency_rad >= CONFIG.get("ZOOM_DIRECTION_CONSISTENCY", 0.7):
                     if len(vec_n_f) > 5:
                         corr = np.corrcoef(radial_n_f, vec_n_f)[0, 1]
@@ -233,17 +266,16 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True):
 
     return has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom
 
-
 # ======================== 完整检测 ========================
 
-def full_is_new_cel(prev, curr, use_optical_flow):
+def full_is_new_cel(prev, curr, use_optical_flow, use_gpu=False):
     """
     完整检测，返回 (是否为新张, 移动类型描述)
     使用统一运动分析进行全局平移、图层分离、缩放检测，
     并对齐后差分，结合局部运动、相似度等进行综合判断。
     """
     # 相关性及初始差分检查（用于极慢平移/静止直接返回）
-    corr = fast_global_corr(prev, curr)  # 替换模板匹配
+    corr = fast_global_corr(prev, curr)
 
     if corr > CONFIG["FULL_CORR_THRESHOLD"]:
         raw_diff = cv2.absdiff(prev, curr)
@@ -258,8 +290,9 @@ def full_is_new_cel(prev, curr, use_optical_flow):
     _, raw_mask = cv2.threshold(raw_diff, diff_thresh, 255, cv2.THRESH_BINARY)
     raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
 
-    # 统一运动分析（替代原来的独立全局平移估计和图层分离检测）
-    has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom = unified_motion_analysis(prev, curr)
+    # 统一运动分析（传入 use_gpu）
+    has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom = unified_motion_analysis(
+        prev, curr, use_optical_flow, use_gpu=use_gpu)
 
     # 对齐后差分
     diff = cv2.absdiff(prev, curr_aligned)
@@ -268,24 +301,29 @@ def full_is_new_cel(prev, curr, use_optical_flow):
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     change_ratio = np.count_nonzero(mask) / mask.size
 
-    # 全局平移过滤：有平移 + 对齐后变化小 → 不是新张
+    # 全局平移过滤
     if raw_ratio >= CONFIG["MIN_CHANGE_RATIO"] and change_ratio < CONFIG["ALIGNED_CHANGE_THRESHOLD"] and has_shift:
         return False, "全局平移"
 
-    # 进一步分析（变化面积超过对齐阈值）
     if change_ratio >= CONFIG["ALIGNED_CHANGE_THRESHOLD"]:
         if has_local_motion(mask):
             return True, "新作画"
 
-        # 图层分离运镜
         if use_optical_flow and is_layer_move:
             return False, "图层分离运镜"
-        # 缩放运镜
         if use_optical_flow and is_zoom:
             return False, "缩放运镜"
 
         if change_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
             return True, "新作画"
+
+    if change_ratio < CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
+        mask_inv = cv2.bitwise_not(mask)
+        score = cv2.matchTemplate(prev, curr_aligned, cv2.TM_CCOEFF_NORMED, mask=mask_inv)[0][0]
+        if score >= CONFIG["SSIM_THRESHOLD"]:
+            return False, "局部变化(过滤)"
+
+
 
     # 剩余微小变化的补充检查
     if change_ratio < CONFIG["SIGNIFICANT_CHANGE_RATIO"]:

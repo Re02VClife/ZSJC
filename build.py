@@ -7,6 +7,7 @@ module_files = [
     'widgets.py',
     'detection.py',
     'preview.py',
+    'video_source.py',
     'oped_detector.py',
     'record_manager.py',
     'ui.py',
@@ -73,13 +74,12 @@ skip_prefix_re = re.compile(r'^#!|^#.*coding')
 
 final_lines = []
 
-# ====================== 自动生成的头部长注释（在这里修改内容） ======================
 header_comment = """#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ==============================================================================
 # 项目名称：动漫张数检测系统
 # 功能说明：dxcam捕获、多重过滤非新作画帧、实时预览、UI交互一体化工具
-# 模块组成：config.py / widgets.py / detection.py / preview.py / ui.py / main.py
+# 模块组成：config.py / widgets.py / detection.py / preview.py / video_source.py / oped_detector.py / record_manager.py / ui.py / main.py
 #
 # 注意：以下为本项目目前合并后的完整代码，
 # 若无确认需求，请先向我提问以确认，确认核心框架，并帮我思考可能遗漏的方面，不要直接编写代码；
@@ -88,7 +88,6 @@ header_comment = """#!/usr/bin/env python3
 # 如非必要，原代码的注释没什么问题就不要省略，保持原样即可
 # ==============================================================================
 """
-# 先把头部注释加入最终文件
 final_lines.append(header_comment.strip() + "\n\n")
 
 final_lines.append("# Auto-merged file from multiple modules\n")

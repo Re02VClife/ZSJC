@@ -10,20 +10,22 @@ import sys, os, time, threading, json, copy, subprocess
 from collections import deque
 import csv
 import cv2
-import messagebox
 import numpy as np
 import tkinter as tk
 import tkinter.messagebox as messagebox
-from config import CONFIG, CONFIG_DEFAULT, color_manager, get_project_dir, get_settings_path
+
+# 添加自定义模块导入
+from config import CONFIG, color_manager, get_settings_path, CONFIG_DEFAULT
 from widgets import DraggablePanel
-from detection import (
-    compute_hash, compute_oped_hash, is_raw_change, basic_is_new_cel,
-    full_is_new_cel
-)
+from detection import (compute_hash, compute_oped_hash, adaptive_threshold,
+                       is_raw_change, basic_is_new_cel, full_is_new_cel,
+                       unified_motion_analysis, fast_global_corr, has_local_motion)
 from preview import PreviewManager
-from ui import build_main_ui, create_settings_window, create_crop_window
+from video_source import FrameSource
 from oped_detector import OPEDDetector
 from record_manager import RecordManager
+from ui import (build_main_ui, create_video_controls, create_settings_window,
+               create_crop_window)
 
 # dxcam 检查
 try:
@@ -48,6 +50,7 @@ class AnimeCelCounter:
             base_dir = sys._MEIPASS
         else:
             base_dir = os.path.dirname(os.path.abspath(__file__))
+
         self.readme_path = os.path.join(base_dir, "README.txt")
         self._drag_data = {'start_x': 0, 'start_y': 0, 'dragging': False}
         self._settings_win = None
@@ -150,6 +153,16 @@ class AnimeCelCounter:
             self.region = (384, 216, 1536, 864)
             self.frame_shape = (100, 100)
 
+        # ========== 新增：视频模式与 GPU 初始化 ==========
+        self.video_mode = CONFIG.get("VIDEO_MODE", False)
+        self.video_file_path = CONFIG.get("VIDEO_FILE_PATH", "")
+        self.use_gpu = CONFIG.get("GPU_ENABLED", False)
+        self.frame_source = None  # 将在导入视频时创建
+        self.video_controls = None  # 视频控制条，初始隐藏
+        self.video_clock = 0.0  # 视频播放位置（秒）
+        self.video_is_playing = True
+        self.video_playback_speed = CONFIG.get("VIDEO_PLAYBACK_SPEED", 1.0)
+        self._current_clock = 0.0  # 统一的时间基准（秒），波形、显示等均使用此值
         # ---------- 预览管理器 ----------
         self.preview_manager = PreviewManager()
 
@@ -190,6 +203,7 @@ class AnimeCelCounter:
         self.root.after(CONFIG["WAVE_REFRESH_MS"], self.update_wave)
         self.root.after(CONFIG["WAVE2_REFRESH_MS"], self.update_wave2)
         self.root.mainloop()
+
 
     # ---------- 辅助方法 ----------
     def _compute_region_from_base(self, base_rect, ratio, screen_w, screen_h):
@@ -283,10 +297,12 @@ class AnimeCelCounter:
         x0, x1 = 5, 5 + btn_w
         pause_text = "暂停/继续" if self.is_running else "继续"
         buttons_info = [
+            ("关闭", self._on_close),
             ("设置", self.open_settings),
+            ("导入视频", self._import_video),
             (pause_text, self.pause),
-            ("重置统计", self.reset_stats),
-            ("关闭", self._on_close)
+            ("重置统计", self.reset_stats)
+
         ]
         accent = color_manager.get_color('accent')
         for i, (text, cmd) in enumerate(buttons_info):
@@ -315,6 +331,31 @@ class AnimeCelCounter:
             canvas.tag_bind(text_id, "<Leave>",
                             lambda e, r=rect_id: canvas.itemconfig(r, fill=""))
 
+    def _import_video(self):
+        from tkinter import filedialog
+        file_path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4 *.avi *.mkv *.mov")])
+        if not file_path:
+            return
+        # 切换为视频模式
+        if self.frame_source:
+            self.frame_source.close()
+        from video_source import FrameSource
+        self.frame_source = FrameSource(mode='video', video_path=file_path,
+                                        scale_factor=CONFIG["SCALE_FACTOR"],
+                                        use_gpu=self.use_gpu)
+        self.video_mode = True
+        self.frame_shape = self.frame_source.frame_shape
+        # 创建并显示视频控制条
+        if self.video_controls is None:
+            self.video_controls = create_video_controls(self.root, self)
+        self.video_controls['frame'].pack(fill=tk.X, side=tk.BOTTOM, pady=(0, 5))
+        # 重置统计并自动开始播放
+        self.reset_stats()
+        self.video_is_playing = True
+        self.is_running = True
+        self._run_event.set()
+        CONFIG["VIDEO_MODE"] = True
+        CONFIG["VIDEO_FILE_PATH"] = file_path
     def open_settings(self):
         """打开设置窗口"""
         if self._settings_win is not None and self._settings_win.winfo_exists():
@@ -1006,47 +1047,80 @@ class AnimeCelCounter:
     # ---------- 主捕获与检测循环 ----------
     def _capture_loop(self):
         """
-        主截图与检测循环，运行在独立线程中。
-        核心流程：截帧 -> 灰度/缩放 -> 原始变化检测 -> 基础/完整检测 -> 哈希过滤 -> 计数
-        同时维护 OP/ED 历史波形、每秒采样，并周期性执行 OP/ED 匹配。
-        当匹配到已知 OP/ED 片段时，暂停全局张数与时间统计，仅记录首次出现的片段数据。
+        统一捕获与检测循环，兼容实时模式和视频模式。
+        实时模式仍使用 dxcam，视频模式使用 FrameSource。
         """
         target_fps = 48
         target_interval = 1.0 / target_fps
         next_frame_time = time.perf_counter()
 
-        # OP/ED 相关局部变量
-
         oped_sample_interval = CONFIG["OPED_SAMPLE_INTERVAL_SEC"]
 
         while not self._stop_event.is_set():
-            # 等待运行事件或停止事件，超时 0.1 秒检查一次
-            self._run_event.wait(timeout=0.1)
+            if self.video_mode:
+                # 视频模式下，如果暂停则等待，否则不等待直接处理
+                if not self._run_event.is_set():
+                    self._run_event.wait(timeout=0.05)  # 暂停时短暂等待
+                    continue
+            else:
+                self._run_event.wait(timeout=0.1)
             if self._stop_event.is_set():
                 break
-            # ---------- 帧率控制 ----------
-            now = time.perf_counter()
-            if now < next_frame_time:
-                sleep_time = next_frame_time - now
-                if sleep_time > 0.002:
-                    time.sleep(sleep_time * 0.8)
-                while time.perf_counter() < next_frame_time:
-                    pass
+
+            # 帧率控制（视频模式下跳过，因为有自己的播放速度）
+            if not self.video_mode:
+                now = time.perf_counter()
+                if now < next_frame_time:
+                    sleep_time = next_frame_time - now
+                    if sleep_time > 0.002:
+                        time.sleep(sleep_time * 0.8)
+                    while time.perf_counter() < next_frame_time:
+                        pass
 
             # 获取当前帧
-            now_frame = self._get_screen_dxcam()
-            now_ts = time.time()
-
-            # 更新帧率目标
-            if time.perf_counter() > next_frame_time + target_interval:
-                next_frame_time = time.perf_counter() + target_interval
+            if self.video_mode and self.frame_source is not None:
+                ts, now_frame, _ = self.frame_source.next_frame()
+                if now_frame is None:
+                    # 视频结束
+                    self.pause_video()  # 自动暂停
+                    continue
+                if not self.video_is_playing:
+                    # 暂停状态，不处理新帧，等待恢复
+                    time.sleep(0.001)
+                    continue
+                # 视频模式下，时间基准为视频时间戳
+                now_ts = time.time()
+                self.video_clock = ts  # 更新视频时钟
             else:
-                next_frame_time += target_interval
+                # 实时模式：使用 dxcam
+                frame = self.camera.get_latest_frame()
+                if frame is None:
+                    with self.lock:
+                        last = self.last_frame.copy() if self.last_frame is not None else np.zeros(self.frame_shape,
+                                                                                                   dtype=np.uint8)
+                    now_frame = last
+                else:
+                    l, t, r, b = self.region
+                    frame = frame[t:b, l:r]
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    now_frame = cv2.resize(gray, (0, 0), fx=CONFIG["SCALE_FACTOR"], fy=CONFIG["SCALE_FACTOR"])
+                ts = time.time()  # 实时模式时间戳
+                self.video_clock = ts  # 兼容后续代码
+
+            # 更新帧率目标（仅实时模式）
+            if not self.video_mode:
+                if time.perf_counter() > next_frame_time + target_interval:
+                    next_frame_time = time.perf_counter() + target_interval
+                else:
+                    next_frame_time += target_interval
 
             # 获取上一帧（线程安全）
             with self.lock:
                 last = self.last_frame.copy() if self.last_frame is not None else None
 
+            # ========== 新增：确保上一帧与当前帧尺寸一致 ==========
+            if last is not None and last.shape != now_frame.shape:
+                last = None
             new_cel = 0
             raw_new_cel = 0
             move_type = "静止"
@@ -1056,31 +1130,29 @@ class AnimeCelCounter:
                 raw_detected = is_raw_change(last, now_frame)
                 raw_new_cel = 1 if raw_detected else 0
 
-                # 基础检测（始终执行）
                 basic_detected, move_type = basic_is_new_cel(last, now_frame)
                 if basic_detected:
-                    self.raw_detection_timestamps.append(now_ts)
+                    self.raw_detection_timestamps.append(ts)  # 使用时间戳
 
                 # 动态过滤窗口维护
                 window_sec = CONFIG["FILTER_TRIGGER_WINDOW_MS"] / 1000.0
-                while self.raw_detection_timestamps and self.raw_detection_timestamps[0] < now_ts - window_sec:
+                while self.raw_detection_timestamps and self.raw_detection_timestamps[0] < ts - window_sec:
                     self.raw_detection_timestamps.popleft()
 
-                # 决定是否启用完整检测
                 if len(self.raw_detection_timestamps) >= CONFIG["FILTER_TRIGGER_COUNT"]:
                     if not self.full_filter_active:
                         self.full_filter_active = True
-                    self.full_filter_active_until = now_ts + CONFIG["FULL_FILTER_HOLD_SEC"]
-                elif self.full_filter_active and now_ts > self.full_filter_active_until:
+                    self.full_filter_active_until = ts + CONFIG["FULL_FILTER_HOLD_SEC"]
+                elif self.full_filter_active and ts > self.full_filter_active_until:
                     self.full_filter_active = False
 
-                # 最终检测：基础或完整
                 if self.full_filter_active:
-                    final_detected, move_type = full_is_new_cel(last, now_frame, self.use_optical_flow)
+                    final_detected, move_type = full_is_new_cel(last, now_frame, self.use_optical_flow,
+                                                                use_gpu=self.use_gpu)
                 else:
                     final_detected = basic_detected
 
-                # 哈希重复帧过滤
+                # 哈希过滤
                 curr_hash = None
                 if self.use_hash_filter:
                     curr_hash = compute_hash(now_frame)
@@ -1098,7 +1170,7 @@ class AnimeCelCounter:
                 else:
                     new_cel = 1 if final_detected else 0
 
-                # 过滤类型统计（仅当原始检测到但最终未计数时）
+                # 过滤统计
                 if raw_new_cel == 1 and new_cel == 0:
                     if duplicate and final_detected:
                         self.total_hash_filtered += 1
@@ -1116,12 +1188,10 @@ class AnimeCelCounter:
                         else:
                             self.total_other_unknown_filtered += 1
 
-                # 更新哈希缓冲区
                 if self.use_hash_filter:
                     with self.lock:
                         self.frame_buffer.append(curr_hash)
             else:
-                # 首帧：直接记录哈希
                 if self.use_hash_filter:
                     with self.lock:
                         self.frame_buffer.append(compute_hash(now_frame))
@@ -1134,33 +1204,29 @@ class AnimeCelCounter:
             if raw_new_cel:
                 self.total_raw_cels_count += 1
 
-
-
-            # 更新上一帧
             with self.lock:
                 self.last_frame = now_frame
                 if not self._has_first_frame:
                     self._has_first_frame = True
 
-            # 更新预览缓存
             self.preview_cache = (last, now_frame.copy() if now_frame is not None else None)
 
-            # 实时张数滑动窗口更新
-            self.recent_frames.append((now_ts, new_cel))
+            # 实时张数滑动窗口（使用视频时钟 ts 代替真实时间）
+            self.recent_frames.append((ts, new_cel))
             self.recent_sum += new_cel
-            while self.recent_frames and now_ts - self.recent_frames[0][0] > 1.0:
+            while self.recent_frames and ts - self.recent_frames[0][0] > 1.0:
                 old = self.recent_frames.popleft()
                 self.recent_sum -= old[1]
 
-            self.recent_frames_raw.append((now_ts, raw_new_cel))
+            self.recent_frames_raw.append((ts, raw_new_cel))
             self.recent_sum_raw += raw_new_cel
-            while self.recent_frames_raw and now_ts - self.recent_frames_raw[0][0] > 1.0:
+            while self.recent_frames_raw and ts - self.recent_frames_raw[0][0] > 1.0:
                 old = self.recent_frames_raw.popleft()
                 self.recent_sum_raw -= old[1]
 
-            span = now_ts - self.recent_frames[0][0] if self.recent_frames else 0.001
+            span = ts - self.recent_frames[0][0] if self.recent_frames else 0.001
             cels = self.recent_sum / max(span, 0.001) if self.recent_frames else 0.0
-            span_raw = now_ts - self.recent_frames_raw[0][0] if self.recent_frames_raw else 0.001
+            span_raw = ts - self.recent_frames_raw[0][0] if self.recent_frames_raw else 0.001
             cels_raw = self.recent_sum_raw / max(span_raw, 0.001) if self.recent_frames_raw else 0.0
 
             with self.lock:
@@ -1168,30 +1234,32 @@ class AnimeCelCounter:
                 self.current_raw_cels = cels_raw
                 self.last_move_type = move_type if last is not None else "静止"
 
-
-            # OP/ED 采样与检测
-            if CONFIG["OPED_DETECTION_ENABLED"] and now_ts - self.oped_detector.last_sample_time >= oped_sample_interval:
+            # OP/ED 采样（使用视频时钟）
+            if CONFIG["OPED_DETECTION_ENABLED"] and ts - self.oped_detector.last_sample_time >= oped_sample_interval:
                 with self.lock:
                     fc = self.current_cels
                     rc = self.current_raw_cels
-
                 frame_hash = compute_oped_hash(now_frame) if CONFIG.get("OPED_HASH_ENABLED", True) else None
-                self.oped_detector.sample(self.elapsed_time, fc, rc, frame_hash)
-                self.instant_fps_history.append((self.elapsed_time, self.current_cels))
-
+                self.oped_detector.sample(self.video_clock, fc, rc, frame_hash)
+                self.instant_fps_history.append((self.video_clock, self.current_cels))
     # ==================== UI 更新与波形 ====================
     def loop(self):
-        """主 UI 更新循环"""
+        """主 UI 更新循环（兼容视频时钟）"""
         if self.is_running:
             now_real = time.time()
-
-            self.elapsed_time += now_real - self.last_loop_time
+            # 使用视频时钟或真实时钟
+            if self.video_mode:
+                # 视频模式下 self.video_clock 由 _capture_loop 更新
+                current_clock = self.video_clock
+            else:
+                self.elapsed_time += now_real - self.last_loop_time
+                current_clock = self.elapsed_time
             self.last_loop_time = now_real
-
-            # 每秒记录一次历史数据
+            self._current_clock = current_clock  # 同步全局时钟
+            # 每秒记录历史（使用 current_clock）
             if not hasattr(self, '_last_recorded_time'):
                 self._last_recorded_time = -1
-            if self.elapsed_time - self._last_recorded_time >= 1.0:
+            if current_clock - self._last_recorded_time >= 1.0:
                 with self.lock:
                     total_r = self.total_raw_cels_count
                     total_f = self.total_cels_count
@@ -1202,26 +1270,25 @@ class AnimeCelCounter:
                     local_f = self.total_local_filtered
                     other_f = self.total_other_unknown_filtered
                     zoom_f = self.total_zoom_filtered
-                self.total_history.append((self.elapsed_time, total_r, total_f,
+                self.total_history.append((current_clock, total_r, total_f,
                                            trans_f, flow_f, hash_f,
                                            still_f, local_f, other_f, zoom_f))
-                self._last_recorded_time = self.elapsed_time
+                self._last_recorded_time = current_clock
 
             with self.lock:
                 current_total = self.total_cels_count
                 has_frame = self._has_first_frame
 
-
             net_cels = current_total - self.oped_detector.deducted_cels
-            net_time = self.elapsed_time - self.oped_detector.deducted_time
+            net_time = current_clock - self.oped_detector.deducted_time  # 扣除OP/ED时间
 
-            # 静止自动暂停检测
+            # 静止自动暂停检测（使用 net_cels 和 net_time）
             if has_frame:
                 if net_cels != self._prev_cels_count:
                     self.idle_start_time = None
                 elif self.idle_start_time is None:
-                    self.idle_start_time = self.elapsed_time
-                elif self.elapsed_time - self.idle_start_time >= CONFIG["JingzhiShiJian"]:
+                    self.idle_start_time = self._current_clock
+                elif self._current_clock - self.idle_start_time >= CONFIG["JingzhiShiJian"]:
                     self.pause()
             self._prev_cels_count = net_cels
 
@@ -1238,7 +1305,6 @@ class AnimeCelCounter:
 
                 avg_net = net_cels / net_time if net_time > 0 else 0.0
 
-                accent = color_manager.get_color('accent')
                 self.lb_rt.config(text=f"实时张数：{real:.1f} ")
                 self.lb_total_time.config(text=f"运行时长：{net_time:.1f} s")
                 self.lb_total_cels.config(text=f"总张数：{net_cels}")
@@ -1248,8 +1314,72 @@ class AnimeCelCounter:
                 self.last_refresh = now_real
                 self._last_disp_cels = current_total
 
+
+            # 视频模式下更新进度条
+            if self.video_mode and self.video_controls:
+                self._update_video_controls()
+
         self.root.after(20, self.loop)
 
+    def _update_video_controls(self):
+        """更新视频进度条和时间标签"""
+        if not self.video_controls or self.frame_source is None:
+            return
+        current_time, duration, cur_frame, total_frames = self.frame_source.get_progress()
+        progress = (current_time / duration * 100) if duration > 0 else 0
+        self.video_controls['progress_var'].set(progress)
+        time_str = f"{self._format_time(current_time)}/{self._format_time(duration)}"
+        self.video_controls['time_label'].config(text=time_str)
+
+    def _format_time(self, seconds):
+        m, s = divmod(int(seconds), 60)
+        return f"{m:02d}:{s:02d}"
+
+    def _on_seek(self, value):
+        """进度条拖动回调"""
+        if self.frame_source is None:
+            return
+        total_dur = self.frame_source.video_duration
+        pos = float(value) / 100.0 * total_dur
+        self.frame_source.seek(pos)
+        # 重置一些内部状态
+        self._last_recorded_time = -1
+        with self.lock:
+            self.last_frame = None
+
+    def _on_speed_change(self, value):
+        """倍速切换"""
+        speed = float(value.replace('x', ''))
+        CONFIG["VIDEO_PLAYBACK_SPEED"] = speed
+        # 视频模式下通过控制帧读取间隔实现倍速，需调整捕获循环
+        # 简单方法：在 _capture_loop 中动态调整目标间隔
+        # 这里记录速度，在循环中动态调整 target_interval
+        self.video_playback_speed = speed
+
+    def pause_video(self):
+        self.video_is_playing = False
+        self.is_running = False
+        self._run_event.clear()
+        if self.video_controls:
+            self.video_controls['play_var'].set(False)
+            self.video_controls['play_btn'].config(text="▶")
+
+    def resume_video(self):
+        self.video_is_playing = True
+        self.is_running = True
+        self._run_event.set()
+        self.last_loop_time = time.time()
+        if self.video_controls:
+            self.video_controls['play_var'].set(True)
+            self.video_controls['play_btn'].config(text="⏸")
+
+    def _save_gpu_video_config(self, gpu_enabled, speed_str):
+        CONFIG["GPU_ENABLED"] = gpu_enabled
+        try:
+            CONFIG["VIDEO_PLAYBACK_SPEED"] = float(speed_str)
+        except:
+            pass
+        self._save_all_settings()
     def pause(self):
         """暂停/继续"""
         self.is_running = not self.is_running
@@ -1291,6 +1421,7 @@ class AnimeCelCounter:
         self.total_count = 0
         self.last_refresh = time.time()
         self.elapsed_time = 0.0
+        self._current_clock = 0.0
         self.last_loop_time = time.time()
         self.start_real_time = time.time()  # 重置后重新记录开始时间
         self.idle_start_time = None
@@ -1340,13 +1471,17 @@ class AnimeCelCounter:
 
         if was_running:
             self._run_event.set()
-            try:
-                self.camera.release()
-            except:
-                pass
-            self.camera = dxcam.create(output_color="BGR")
-            self.camera.start(target_fps=0, video_mode=False)
+            if not self.video_mode:
+                try:
+                    self.camera.release()
+                except:
+                    pass
+                self.camera = dxcam.create(output_color="BGR")
+                self.camera.start(target_fps=0, video_mode=False)
 
+        if self.video_mode and self.frame_source:
+            self.frame_source.seek(0)  # 从头开始
+            self.video_clock = 0.0
     def _save_profile(self):
         """保存 profiling 数据到文件"""
         try:
@@ -1361,7 +1496,8 @@ class AnimeCelCounter:
         self._stop_event.set()
         self._run_event.set()
         self.preview_manager.stop()
-
+        if self.frame_source:
+            self.frame_source.close()
         # 等待 capture 线程结束（最多 2 秒）
         if hasattr(self, 'capture_thread') and self.capture_thread.is_alive():
             self.capture_thread.join(timeout=2.0)
@@ -1417,8 +1553,9 @@ class AnimeCelCounter:
             with self.lock:
                 cels = self.current_cels
                 raw_cels = self.current_raw_cels
-            self.wave_data.append((self.elapsed_time, cels))
-            self.wave_raw_data.append((self.elapsed_time, raw_cels))
+            self.wave_data.append((self._current_clock, cels))
+            self.wave_raw_data.append((self._current_clock, raw_cels))
+
         self.draw_wave()
         self.root.after(CONFIG["WAVE_REFRESH_MS"], self.update_wave)
 
@@ -1430,8 +1567,8 @@ class AnimeCelCounter:
                 raw_raw = self.current_raw_cels
             self.smooth_cels = 0.2 * raw + 0.8 * self.smooth_cels
             self.smooth_raw_cels = 0.2 * raw_raw + 0.8 * self.smooth_raw_cels
-            self.wave2_data.append((self.elapsed_time, self.smooth_cels))
-            self.wave2_raw_data.append((self.elapsed_time, self.smooth_raw_cels))
+            self.wave2_data.append((self._current_clock, self.smooth_cels))
+            self.wave2_raw_data.append((self._current_clock, self.smooth_raw_cels))
         self.draw_wave2()
         self.root.after(CONFIG["WAVE2_REFRESH_MS"], self.update_wave2)
 
@@ -1469,7 +1606,7 @@ class AnimeCelCounter:
         plot_h = height - self.wave_margin_top - self.wave_margin_bottom
         if plot_w <= 0 or plot_h <= 0:
             return
-        now = self.elapsed_time
+        now = self._current_clock
         start = now - history_sec
         accent = color_manager.get_color('accent')
         self._draw_axes_only(canvas, plot_w, plot_h, y_max, accent)
