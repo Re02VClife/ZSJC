@@ -1,3 +1,4 @@
+# ====== Module: config.py ======
 # config.py
 import copy
 import os
@@ -165,11 +166,10 @@ CONFIG = {
         "filter_local": "#00FFFF",
         "filter_other": "#888888",
         "filter_raw_total": "#9dc1c6",
-        "filter_zoom": "#FFA07A",       # 缩放过滤颜色
+        "filter_zoom": "#FFA07A",
         "filter_filtered_total": "#E6397C"
     },
-
-    "USE_CUSTOM_COLORS": True,          # 是否启用自定义调色板
+    "USE_CUSTOM_COLORS": True,
 }
 
 # 深拷贝一份作为默认配置，用于恢复出厂设置
@@ -189,3 +189,14 @@ def get_project_dir():
 def get_settings_path():
     """返回配置文件存放路径（统一放在项目文件夹下）"""
     return os.path.join(get_project_dir(), "cel_counter_settings.json")
+
+def get_all_colors():
+    """返回当前颜色字典的深拷贝（用于持久化）"""
+    return copy.deepcopy(CONFIG["COLORS"])
+
+def set_all_colors(colors_dict):
+    """批量更新颜色字典并刷新主题"""
+    CONFIG["COLORS"].update(colors_dict)
+    if color_manager:
+        color_manager._config = CONFIG["COLORS"]
+        color_manager.apply_theme()

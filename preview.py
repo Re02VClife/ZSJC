@@ -1,3 +1,4 @@
+# ====== Module: preview.py ======
 # preview.py
 """
 实时预览模块：生成叠加了稠密光流、差分热力图、稀疏光流的预览图像。
@@ -10,7 +11,6 @@ import threading
 from config import CONFIG
 from detection import adaptive_threshold    # 仅需差分阈值计算
 
-# 预览功能依赖 PIL
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
@@ -31,13 +31,11 @@ class PreviewManager:
         self.diff_decay = None
         self.motion_history = None
 
-        # 显示标志
-        self.show_dense = False            # 默认关闭稠密光流
+        self.show_dense = False
         self.show_sparse = True
         self.show_curr = True
         self.show_diff = True
 
-        # 回调
         self._get_cache_cb = None
         self._update_image_cb = None
         self._root = None
@@ -61,10 +59,10 @@ class PreviewManager:
         self.thread.start()
 
     def stop(self):
-        """停止预览线程"""
+        """停止预览线程，并等待线程结束，避免在已销毁的 root 上调度 after"""
         self.active = False
         if self.thread is not None:
-            self.thread.join(timeout=0.5)
+            self.thread.join(timeout=1.0)
             self.thread = None
 
     def _loop(self):
@@ -75,15 +73,15 @@ class PreviewManager:
                 if curr is not None:
                     combined = self.make_preview_image(last, curr)
                     if self._update_image_cb and self._root:
-                        self._root.after(1, lambda img=combined: self._update_image_cb(img))
+                        # 确保 root 还存在再调度
+                        try:
+                            self._root.after(1, lambda img=combined: self._update_image_cb(img))
+                        except Exception:
+                            break  # 主窗口已销毁，退出循环
             time.sleep(self.update_interval)
 
     def make_preview_image(self, last, curr):
-        """
-        根据当前帧和上一帧生成叠加预览图像。
-        包含：稠密光流、差分热力图（带衰减）、稀疏光流拖影。
-        """
-        # 基础层：当前帧灰度转 BGR
+        """根据当前帧和上一帧生成叠加预览图像"""
         if self.show_curr:
             base = cv2.cvtColor(curr, cv2.COLOR_GRAY2BGR)
         else:
@@ -104,30 +102,25 @@ class PreviewManager:
             except Exception:
                 pass
 
-        # ---------- 差分热力图（带衰减） ----------
+        # ---------- 差分热力图（带衰减）----------
         if self.show_diff and last is not None and last.shape == curr.shape:
             diff = cv2.absdiff(last, curr)
             thresh = adaptive_threshold(curr)
             _, diff_mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
-
-            # 仅保留超过阈值的差分区域
             diff_filtered = np.where(diff_mask > 0, diff, 0).astype(np.float32)
             if diff_filtered.max() > 0:
                 diff_norm = diff_filtered / diff_filtered.max()
             else:
                 diff_norm = np.zeros_like(diff_filtered)
-
             decay_factor = CONFIG["PREVIEW_DIFF_DECAY"]
             if self.diff_decay is None or self.diff_decay.shape != diff_norm.shape:
                 self.diff_decay = np.zeros_like(diff_norm)
             combined = np.maximum(diff_norm, self.diff_decay * decay_factor)
             self.diff_decay = combined.copy()
-
             combined_u8 = (combined * 255).astype(np.uint8)
             heat = cv2.applyColorMap(combined_u8, cv2.COLORMAP_HOT)
             base = cv2.addWeighted(base, 0.6, heat, 0.4, 0)
         else:
-            # 如果关闭了差分显示，让残留逐渐衰减
             if self.diff_decay is not None:
                 self.diff_decay *= 0.7
 
@@ -139,7 +132,7 @@ class PreviewManager:
                     maxCorners=CONFIG["FLOW_FEATURE_COUNT"],
                     qualityLevel=CONFIG["FLOW_QUALITY_LEVEL"],
                     minDistance=CONFIG["FLOW_MIN_DISTANCE"],
-                    mask=None                     # 全图检测，不再使用字幕掩膜
+                    mask=None
                 )
                 if corners is not None:
                     p1 = np.float32(corners).reshape(-1, 2)
@@ -149,7 +142,6 @@ class PreviewManager:
                         h, w = base.shape[:2]
                         if self.motion_history is None or self.motion_history.shape != (h, w, 3):
                             self.motion_history = np.zeros((h, w, 3), dtype=np.float32)
-
                         decay = CONFIG["PREVIEW_MOTION_DECAY"]
                         self.motion_history *= decay
                         max_speed = CONFIG["PREVIEW_MOTION_MAX_SPEED"]
@@ -161,7 +153,6 @@ class PreviewManager:
                             dx = pt2[0] - pt1[0]
                             dy = pt2[1] - pt1[1]
                             speed = np.sqrt(dx * dx + dy * dy)
-                            # 颜色映射：快速移动偏蓝，慢速偏红
                             hue = int(240 * (1 - min(speed, max_speed) / max_speed))
                             color_bgr = cv2.cvtColor(
                                 np.array([[[hue, 255, 255]]], dtype=np.uint8),
@@ -170,7 +161,6 @@ class PreviewManager:
                             cv2.line(self.motion_history, pt1, pt2,
                                      color_bgr.astype(np.float32).tolist(),
                                      2, cv2.LINE_AA)
-
                         hist_disp = np.clip(self.motion_history, 0, 255).astype(np.uint8)
                         base = cv2.addWeighted(base, 0.7, hist_disp, 0.3, 0)
             except Exception:
@@ -186,7 +176,6 @@ class PreviewManager:
         label_w = label.winfo_width()
         label_h = label.winfo_height()
         if label_w > 1 and label_h > 1:
-            # 按比例缩放并居中显示
             img_w, img_h = pil_img.size
             scale = min(label_w / img_w, label_h / img_h)
             new_w = int(img_w * scale)

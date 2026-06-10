@@ -1,51 +1,61 @@
+# ====== Module: detection.py ======
 # detection.py
 """
 动画作画张数检测模块。
 包含感知哈希、自适应阈值、全局平移估计、图层分离、缩放检测、
 局部运动判断、基础/完整检测等功能。
 """
-
+from config import CONFIG
 import cv2
 import numpy as np
-from config import CONFIG
 try:
     import cv2.cuda
     CUDA_AVAILABLE = True
 except ImportError:
     CUDA_AVAILABLE = False
+
 # ======================== 基本工具 ========================
 
 def compute_hash(gray_img):
-    """计算感知哈希（16x16）"""
-    resized = cv2.resize(gray_img, (16, 16), interpolation=cv2.INTER_AREA)
-    avg = resized.mean()
-    return (resized > avg).flatten()
-def compute_oped_hash(gray_img):     # <-- 从此行开始替换整个函数
     """
     使用感知哈希 (pHash) 计算 64 位哈希值，用于 OP/ED 匹配。
     流程：缩放 -> DCT -> 取左上角 8x8 低频系数 -> 二值化。
     返回整数 (64 位)。
     """
-    # 1. 缩放为 32x32（提高分辨率以增加信息量）
     resized = cv2.resize(gray_img, (32, 32), interpolation=cv2.INTER_AREA)
-    # 2. 离散余弦变换
     dct = cv2.dct(np.float32(resized))
-    # 3. 保留左上角 8x8 低频分量（64 位）
     dct_low = dct[:8, :8]
-    # 4. 计算均值并二值化
     avg = dct_low.mean()
     bits = dct_low > avg
-    # 5. 打包为 64 位整数 (little-endian)
     packed = np.packbits(bits.flatten())
     return int.from_bytes(packed.tobytes(), 'little')
+
+
+def compute_all_hashes(gray_img):
+    """
+    一次缩放，同时返回 (hash_256, oped_hash)
+    hash_256 : 256 位 bool 数组（用于重复帧过滤）
+    oped_hash: 64 位整数（用于 OP/ED 匹配）
+    """
+    resized_32 = cv2.resize(gray_img, (32, 32), interpolation=cv2.INTER_AREA)
+    resized_16 = cv2.resize(resized_32, (16, 16), interpolation=cv2.INTER_AREA)
+    avg_16 = resized_16.mean()
+    hash_256 = (resized_16 > avg_16).flatten()
+
+    dct = cv2.dct(np.float32(resized_32))
+    dct_low = dct[:8, :8]
+    avg_oped = dct_low.mean()
+    bits = dct_low > avg_oped
+    packed = np.packbits(bits.flatten())
+    oped_hash = int.from_bytes(packed.tobytes(), 'little')
+    return hash_256, oped_hash
+
+
 def adaptive_threshold(frame):
     """根据帧的平均亮度计算自适应差分阈值"""
     mean_val = np.mean(frame)
     t = CONFIG["MIN_DIFF_THRESHOLD"] + (mean_val / 255.0) * (CONFIG["MAX_DIFF_THRESHOLD"] - CONFIG["MIN_DIFF_THRESHOLD"])
     return max(CONFIG["MIN_DIFF_THRESHOLD"], min(CONFIG["MAX_DIFF_THRESHOLD"], t))
-
-
-
 
 
 # ======================== 原始变化检测 ========================
@@ -61,7 +71,6 @@ def is_raw_change(prev, curr):
     return ratio >= CONFIG["MIN_CHANGE_RATIO"]
 
 
-
 def fast_global_corr(img1, img2):
     """快速计算两幅等尺寸灰度图的整体归一化相关系数（-1~1）"""
     f1 = img1.astype(np.float64).ravel()
@@ -73,39 +82,38 @@ def fast_global_corr(img1, img2):
     if den < 1e-10:
         return 1.0
     return num / den
+
+
 # ======================== 基础检测 ========================
 
 def basic_is_new_cel(prev, curr):
-    """基础检测，返回 (是否为新张, 移动类型描述)"""
-    corr = fast_global_corr(prev, curr)   # 替换模板匹配
+    # 先计算差分，快速判断静止
+    diff = cv2.absdiff(prev, curr)
+    thresh = adaptive_threshold(curr)
+    _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    raw_ratio = np.count_nonzero(mask) / mask.size
 
+    # 如果变化占比极小，直接判定为静止，无需计算相关系数
+    if raw_ratio < CONFIG["MIN_CHANGE_RATIO"]:
+        return False, "静止"
+
+    # 否则计算相关系数，继续原有逻辑
+    corr = fast_global_corr(prev, curr)
     if corr > CONFIG["BASIC_CORR_THRESHOLD"]:
-        raw_diff = cv2.absdiff(prev, curr)
-        raw_thresh = adaptive_threshold(curr)
-        _, raw_mask = cv2.threshold(raw_diff, raw_thresh, 255, cv2.THRESH_BINARY)
-        # --- 插入闭运算 ---
-        kernel = np.ones((3, 3), np.uint8)
-        raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
-        raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
         if raw_ratio < CONFIG["BASIC_MIN_RAW_RATIO_STILL"]:
             return False, "极慢平移/静止"
         if raw_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
             return True, "新作画(基础)"
         else:
             return True, "新作画(基础)"
-
-    diff_thresh = adaptive_threshold(curr)
-    raw_diff = cv2.absdiff(prev, curr)
-    _, raw_mask = cv2.threshold(raw_diff, diff_thresh, 255, cv2.THRESH_BINARY)
-    kernel = np.ones((3, 3), np.uint8)
-    raw_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_CLOSE, kernel)
-    raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
-
-    if raw_ratio < CONFIG["MIN_CHANGE_RATIO"]:
-        return False, "静止"
-    if raw_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
+    else:
+        if raw_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
+            return True, "新作画(基础)"
         return True, "新作画(基础)"
-    return True, "新作画(基础)"
+
+
 
 # ======================== 局部运动判断 ========================
 
@@ -140,16 +148,16 @@ def has_local_motion(binary_mask):
             return False
     return True
 
-# ======================== 统一运动分析（一次角点，两次光流） ========================
 
-def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False):
+# ======================== 统一运动分析（增加 lk_cuda 参数以复用 GPU 对象） ========================
+
+def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False, lk_cuda=None):
     """
     统一运动分析，支持 GPU 加速（仅光流部分）。
-    若 use_gpu=True 且 CUDA 可用，则使用 cv2.cuda 接口。
+    lk_cuda 可选，若传入则复用已创建的 cv2.cuda.SparsePyrLKOpticalFlow 对象。
     返回: (has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom)
     """
-    max_corners = 200
-    # 角点检测仍在 CPU 上执行（GPU 版 goodFeaturesToTrack 存在但较复杂，暂用 CPU）
+    max_corners = CONFIG["FLOW_FEATURE_COUNT"]
     corners = cv2.goodFeaturesToTrack(
         prev,
         maxCorners=max_corners,
@@ -169,7 +177,6 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False):
 
     p1 = np.float32(corners).reshape(-1, 2)
 
-    # 尝试使用 GPU 光流
     gpu_available = False
     if use_gpu:
         try:
@@ -179,15 +186,15 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False):
             gpu_curr.upload(curr)
             gpu_p1 = cv2.cuda_GpuMat()
             gpu_p1.upload(p1)
-            # 注意：CUDA 的 PyrLK 参数略有不同，需要创建光流对象
-            lk = cv2.cuda.SparsePyrLKOpticalFlow.create(
-                winSize=(21, 21), maxLevel=3, iters=30)
+            # 复用传入的 lk_cuda，若未传入则创建（向后兼容）
+            lk = lk_cuda
+            if lk is None:
+                lk = cv2.cuda.SparsePyrLKOpticalFlow.create(winSize=(21, 21), maxLevel=3, iters=30)
             gpu_p2, gpu_status, _ = lk.calc(gpu_prev, gpu_curr, gpu_p1)
             p2_curr = gpu_p2.download()
             status_curr = gpu_status.download()
             gpu_available = True
-        except Exception as e:
-            # 回退到 CPU
+        except Exception:
             gpu_available = False
 
     if not gpu_available:
@@ -203,14 +210,16 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False):
             h, w = curr.shape
             M = np.float32([[1, 0, -dx], [0, 1, -dy]])
             curr_aligned = cv2.warpAffine(curr, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+
     if not use_optical_flow:
         return has_shift, dx, dy, curr_aligned, False, False
 
-    # 第二次追踪：prev -> curr_aligned，分析残余运动
+    # 第二次追踪：prev -> curr_aligned
     if gpu_available:
         try:
             gpu_aligned = cv2.cuda_GpuMat()
             gpu_aligned.upload(curr_aligned)
+            # 复用 lk 对象
             gpu_p2_aligned, gpu_status_aligned, _ = lk.calc(gpu_prev, gpu_aligned, gpu_p1)
             p2_aligned = gpu_p2_aligned.download()
             status_aligned = gpu_status_aligned.download()
@@ -225,7 +234,7 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False):
         pts = p1[valid]
         norms_res = np.linalg.norm(vecs_res, axis=1)
 
-        # 图层分离检测 (逻辑不变)
+        # 图层分离检测
         moving_mask = norms_res > CONFIG["FLOW_LAYER_STATIC_THRESH"]
         if np.sum(moving_mask) >= CONFIG["LAYER_MIN_MOVING_POINTS"]:
             moving_vecs = vecs_res[moving_mask]
@@ -238,7 +247,7 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False):
                 if consistency > CONFIG["LAYER_DIRECTION_CONSISTENCY"]:
                     is_layer_move = True
 
-        # 缩放检测 (逻辑不变)
+        # 缩放检测
         h, w = prev.shape
         center = np.array([w/2, h/2])
         radial_vecs = pts - center
@@ -266,15 +275,16 @@ def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False):
 
     return has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom
 
-# ======================== 完整检测 ========================
 
-def full_is_new_cel(prev, curr, use_optical_flow, use_gpu=False):
+# ======================== 完整检测（增加 lk_cuda 参数） ========================
+
+def full_is_new_cel(prev, curr, use_optical_flow, use_gpu=False, lk_cuda=None):
     """
     完整检测，返回 (是否为新张, 移动类型描述)
     使用统一运动分析进行全局平移、图层分离、缩放检测，
     并对齐后差分，结合局部运动、相似度等进行综合判断。
+    lk_cuda 可选，用于复用 GPU 光流对象。
     """
-    # 相关性及初始差分检查（用于极慢平移/静止直接返回）
     corr = fast_global_corr(prev, curr)
 
     if corr > CONFIG["FULL_CORR_THRESHOLD"]:
@@ -290,11 +300,9 @@ def full_is_new_cel(prev, curr, use_optical_flow, use_gpu=False):
     _, raw_mask = cv2.threshold(raw_diff, diff_thresh, 255, cv2.THRESH_BINARY)
     raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
 
-    # 统一运动分析（传入 use_gpu）
     has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom = unified_motion_analysis(
-        prev, curr, use_optical_flow, use_gpu=use_gpu)
+        prev, curr, use_optical_flow, use_gpu=use_gpu, lk_cuda=lk_cuda)
 
-    # 对齐后差分
     diff = cv2.absdiff(prev, curr_aligned)
     _, mask = cv2.threshold(diff, diff_thresh, 255, cv2.THRESH_BINARY)
     kernel = np.ones((3, 3), np.uint8)
@@ -317,15 +325,7 @@ def full_is_new_cel(prev, curr, use_optical_flow, use_gpu=False):
         if change_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
             return True, "新作画"
 
-    if change_ratio < CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
-        mask_inv = cv2.bitwise_not(mask)
-        score = cv2.matchTemplate(prev, curr_aligned, cv2.TM_CCOEFF_NORMED, mask=mask_inv)[0][0]
-        if score >= CONFIG["SSIM_THRESHOLD"]:
-            return False, "局部变化(过滤)"
-
-
-
-    # 剩余微小变化的补充检查
+    # 剩余微小变化的补充检查（已删除重复块，仅保留一处）
     if change_ratio < CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
         mask_inv = cv2.bitwise_not(mask)
         score = cv2.matchTemplate(prev, curr_aligned, cv2.TM_CCOEFF_NORMED, mask=mask_inv)[0][0]

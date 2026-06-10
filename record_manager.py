@@ -1,13 +1,15 @@
+# ====== Module: record_manager.py ======
 # record_manager.py
 """
 运行记录管理器：保存/加载/查看/编辑/导出运行记录。
 """
 import json, os, time, csv, tkinter as tk
-from tkinter import filedialog, messagebox
+import tkinter.simpledialog as simpledialog
 import tkinter.ttk as ttk
 import numpy as np
-from config import color_manager, get_settings_path
 
+from config import color_manager, get_settings_path
+from tkinter import filedialog, messagebox
 class RecordManager:
     def __init__(self, counter):
         self.counter = counter

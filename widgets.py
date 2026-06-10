@@ -1,3 +1,4 @@
+# ====== Module: widgets.py ======
 # widgets.py
 import tkinter as tk
 from config import color_manager

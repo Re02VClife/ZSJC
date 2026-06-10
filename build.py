@@ -14,6 +14,10 @@ module_files = [
     'main.py'
 ]
 
+# ================= 注释去除开关 =================
+REMOVE_COMMENTS = False   # 改为 True 即可在合并时过滤掉所有 # 注释
+# ==============================================
+
 # 收集所有内部模块名（不含.py）
 internal_names = [os.path.splitext(m)[0] for m in module_files]
 
@@ -39,7 +43,6 @@ def remove_internal_imports(source_code):
                 # 检查是否以括号开始的多行导入
                 after_import = line[match.end():].strip()
                 if after_import.startswith('('):
-                    # 跳过直到闭合括号
                     # 查找当前行是否已经闭合
                     if ')' in after_import:
                         # 单行括号，直接跳过本行
@@ -68,6 +71,61 @@ def remove_internal_imports(source_code):
         result_lines.append(line)
         i += 1
     return ''.join(result_lines)
+
+
+def remove_comments(source):
+    """
+    安全移除 Python 源代码中的 # 行注释。
+    会正确处理字符串字面量，避免将字符串内的 # 误判为注释。
+    """
+    lines = source.splitlines(True)
+    result = []
+    in_string = False
+    string_char = None
+
+    for line in lines:
+        new_line_chars = []
+        i = 0
+        while i < len(line):
+            ch = line[i]
+
+            if not in_string:
+                # 检测注释：出现在非字符串中的 #
+                if ch == '#' and (i == 0 or line[i-1] != '\\'):
+                    # 忽略 # 及其后的所有字符，保留换行
+                    stripped = ''.join(new_line_chars).rstrip()
+                    if stripped or (result and result[-1].endswith('\n')):
+                        result.append(stripped + '\n')
+                    break
+                elif ch in ("'", '"'):
+                    # 检测三引号
+                    if line[i:i+3] in ("'''", '"""'):
+                        in_string = True
+                        string_char = line[i:i+3]
+                        new_line_chars.append(line[i:i+3])
+                        i += 3
+                        continue
+                    else:
+                        new_line_chars.append(ch)
+                        i += 1
+                        continue
+                else:
+                    new_line_chars.append(ch)
+                    i += 1
+            else:  # 在字符串内部
+                new_line_chars.append(ch)
+                # 检测字符串是否结束
+                if line[i:i+len(string_char)] == string_char:
+                    in_string = False
+                    string_char = None
+                i += 1
+
+        # 如果一行没有以注释结束，则正常添加
+        else:
+            result.append(''.join(new_line_chars))
+
+    return ''.join(result)
+
 
 # 读取文件内容，同时跳过开头的 shebang/coding 声明
 skip_prefix_re = re.compile(r'^#!|^#.*coding')
@@ -110,6 +168,10 @@ for mod_file in module_files:
 
     # 移除内部模块导入
     content = remove_internal_imports(content)
+
+    # 根据开关决定是否去除注释
+    if REMOVE_COMMENTS:
+        content = remove_comments(content)
 
     final_lines.append(f"\n# ====== Module: {mod_file} ======\n")
     final_lines.append(content)

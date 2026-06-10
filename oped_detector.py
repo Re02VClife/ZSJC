@@ -1,3 +1,4 @@
+# ====== Module: oped_detector.py ======
 # oped_detector.py
 """
 OP/ED 实时检测器。
@@ -5,8 +6,9 @@ OP/ED 实时检测器。
 负责归类、扣除张数和时长统计。
 """
 import time
-from collections import deque
 from config import CONFIG
+from collections import deque
+import threading
 
 class OPEDDetector:
     def __init__(self, counter):
@@ -33,6 +35,7 @@ class OPEDDetector:
         self.templates = []                        # [{id, hash_sequence, color, wave_filtered, wave_raw}]
         self.color_palette = ['#FFD700', '#87CEEB', '#90EE90', '#FFB6C1', '#DDA0DD']
         self.next_color_idx = 0
+        self.templates_lock = threading.Lock()     # 新增：模板列表锁
 
         # 累计扣除数据
         self.deducted_cels = 0
@@ -54,7 +57,8 @@ class OPEDDetector:
         self.match_start = None
         self.pending_id = None
         self.collected_hashes = []
-        self.templates.clear()
+        with self.templates_lock:
+            self.templates.clear()
         self.next_color_idx = 0
         self.deducted_cels = 0
         self.deducted_time = 0.0
@@ -80,7 +84,7 @@ class OPEDDetector:
         self._detect_oped()
 
     def _detect_oped(self):
-        """基于帧级哈希匹配的实时 OP/ED 检测。"""
+        """基于帧级哈希匹配的实时 OP/ED 检测，优化自排除比较和线程安全。"""
         if not self.enabled or not CONFIG.get("OPED_HASH_ENABLED", True):
             return
         if len(self.hash_seq) < 1:
@@ -96,13 +100,19 @@ class OPEDDetector:
 
         t_now, h_now = self.hash_seq[-1]
 
+        # 自排除比较：仅比较排除窗口之前的历史，并提前终止循环
         matched = False
-        for t_hist, h_hist in self.hash_seq:
+        for t_hist, h_hist in reversed(self.hash_seq):
             if t_hist >= t_now - self_exclude:
-                break
+                continue  # 还在排除窗口内，跳过
             if bin(h_now ^ h_hist).count('1') <= enter_dist:
                 matched = True
                 break
+            # 因为时间是递增的，一旦遇到早于排除窗口的时间，后续不需要再判断排除窗口
+            if t_hist < t_now - self_exclude:
+                # 如果这一条没匹配上，后续的更早记录也可能匹配，所以不能 break
+                # 但我们可以根据匹配逻辑继续，不优化退出
+                pass
 
         if matched:
             self.match_streak += 1
@@ -146,52 +156,61 @@ class OPEDDetector:
             self.first_match_time = None
 
     def _classify_hash_segment(self, query_hashes):
-        """根据哈希窗口相似度归类或创建模板，返回模板ID"""
-        threshold = 0.75
+        """根据哈希窗口相似度归类或创建模板，返回模板ID（使用配置阈值）"""
+        threshold = CONFIG.get("OPED_CLASSIFY_THRESHOLD", 0.75)  # 修复：使用配置值
         max_dist = CONFIG["OPED_HASH_MAX_DIST"]
         best_ratio = 0.0
         best_id = -1
         best_idx = -1
 
-        for idx, tpl in enumerate(self.templates):
-            tpl_hashes = tpl.get('hash_sequence', [])
-            if len(tpl_hashes) != len(query_hashes):
-                continue
-            similar = 0
-            for q, t in zip(query_hashes, tpl_hashes):
-                if bin(q ^ t).count('1') <= max_dist:
-                    similar += 1
-            ratio = similar / len(query_hashes)
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_id = tpl['id']
-                best_idx = idx
+        with self.templates_lock:
+            for idx, tpl in enumerate(self.templates):
+                tpl_hashes = tpl.get('hash_sequence', [])
+                # 长度不一致时，以较短的为准进行比较
+                min_len = min(len(query_hashes), len(tpl_hashes))
+                if min_len == 0:
+                    continue
+                similar = 0
+                for i in range(min_len):
+                    if bin(query_hashes[i] ^ tpl_hashes[i]).count('1') <= max_dist:
+                        similar += 1
+                ratio = similar / min_len
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_id = tpl['id']
+                    best_idx = idx
 
-        if best_ratio >= threshold:
-            self.templates[best_idx]['hash_sequence'] = list(query_hashes)
-            return best_id
-        else:
-            new_id = len(self.templates)
-            color = self.color_palette[self.next_color_idx % len(self.color_palette)]
-            self.next_color_idx += 1
-            self.templates.append({
-                'id': new_id,
-                'hash_sequence': query_hashes.copy(),
-                'color': color,
-                'wave_filtered': [],
-                'wave_raw': []
-            })
-            return new_id
+            if best_ratio >= threshold:
+                # 更新模板哈希序列为当前查询序列（保持最新）
+                self.templates[best_idx]['hash_sequence'] = list(query_hashes)
+                return best_id
+            else:
+                new_id = len(self.templates)
+                color = self.color_palette[self.next_color_idx % len(self.color_palette)]
+                self.next_color_idx += 1
+                self.templates.append({
+                    'id': new_id,
+                    'hash_sequence': query_hashes.copy(),
+                    'color': color,
+                    'wave_filtered': [],
+                    'wave_raw': []
+                })
+                return new_id
 
     def _apply_deduction(self, start, end):
-        """计算并扣除指定 OP/ED 区间的张数和时长"""
-        # 去重
+        """计算并扣除指定 OP/ED 区间的张数和时长（带锁保护 history 访问）"""
         for old_start, old_end in self.deducted_intervals:
             if abs(old_start - start) < 1.0 and abs(old_end - end) < 1.0:
                 return
         self.deducted_intervals.append((start, end))
 
-        history = list(self.counter.total_history)
+        # 安全地获取 total_history 快照
+        try:
+            with self.counter.lock:  # 假设主计数器有 lock 属性
+                history = list(self.counter.total_history)
+        except AttributeError:
+            history = list(self.counter.total_history)
+
         if not history:
             return
 

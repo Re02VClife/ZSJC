@@ -428,5 +428,44 @@
       "min_instant_fps": 0.0,
       "median_fps": 8.92
     }
+  },
+  {
+    "name": "无职转生上半",
+    "record_time": "2026-06-10 17:50:48",
+    "start_timestamp": 1781067331.3034863,
+    "end_timestamp": 1781085048.0593824,
+    "duration_sec": 15250.6,
+    "total_raw_cels": 146547,
+    "total_filtered_cels": 61461,
+    "filtering": {
+      "translation": 28423,
+      "optical_flow": 6390,
+      "hash": 9617,
+      "still": 4234,
+      "local_motion": 35806,
+      "zoom": 1202,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 52,
+      "total_deducted_time": 62.33,
+      "segments": [
+        {
+          "start": 11268.28,
+          "end": 11330.6,
+          "duration": 62.33,
+          "segment_id": 0,
+          "deducted_cels": 52,
+          "deducted_time": 62.33
+        }
+      ]
+    },
+    "avg_fps_filtered": 4.04,
+    "avg_fps_raw": 9.61,
+    "extra": {
+      "max_instant_fps": 25.2,
+      "min_instant_fps": 0.0,
+      "median_fps": 8.02
+    }
   }
 ]
