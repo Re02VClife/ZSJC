@@ -4,6 +4,7 @@
 实时预览模块：生成叠加了稠密光流、差分热力图、稀疏光流的预览图像。
 """
 
+import opencv_env  # noqa: F401  —— 必须先于 cv2 注册 DLL 搜索路径
 import cv2
 import numpy as np
 import time

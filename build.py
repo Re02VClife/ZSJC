@@ -3,7 +3,10 @@ import os
 import re
 
 module_files = [
+    'opencv_env.py',   # 必须最先：注册 DLL 搜索路径，之后才能 import cv2
     'config.py',
+    'gpu_backend.py',
+    'async_pipeline.py',
     'widgets.py',
     'detection.py',
     'preview.py',
@@ -151,7 +154,9 @@ final_lines.append(header_comment.strip() + "\n\n")
 final_lines.append("# Auto-merged file from multiple modules\n")
 final_lines.append("import sys, os, time, threading, json, copy, subprocess\n")
 final_lines.append("from collections import deque\n")
-final_lines.append("import cv2\n")
+# 注意：不能在这里 import cv2 —— opencv_env 模块（下面的第一段）会先注册
+# CUDA DLL 搜索路径，cv2 必须在那之后导入，否则打包后的 exe 会报
+# "DLL load failed while importing cv2"。
 final_lines.append("import numpy as np\n")
 final_lines.append("import tkinter as tk\n\n")
 final_lines.append("# --- Begin merged modules ---\n")
@@ -173,7 +178,10 @@ for mod_file in module_files:
     if REMOVE_COMMENTS:
         content = remove_comments(content)
 
-    final_lines.append(f"\n# ====== Module: {mod_file} ======\n")
+    marker = f"# ====== Module: {mod_file} ======"
+    # 模块文件自身首行就是该标记时不再重复添加
+    already = content.lstrip().startswith(marker)
+    final_lines.append("\n" if already else f"\n{marker}\n")
     final_lines.append(content)
 
 # 写入最终文件

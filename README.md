@@ -20,7 +20,8 @@
 测出来高数据只代表原画、中割等制作人员付出的血汗较多并不意味着经费一定爆炸。
 
 本项目纯练手，无任何参考，出现各种奇怪的BUG属于正常现象。
-纯cpu计算，未使用CUDA，目前不知道兼不兼容Linux、mac。
+检测主流程以 CPU 为主，GPU（OpenCV CUDA）只接管「角点 + 稀疏光流」这一段；
+没有 CUDA 版 OpenCV 时会自动全部走 CPU，功能不受影响。
 
 ## 功能特性
 
@@ -54,31 +55,77 @@
 - **实时预览**：支持稠密光流、稀疏光流、差分残影、运动轨迹叠加等多种可视化。
 - **布局管理**：支持多套窗口布局的保存与加载。
 - **自动暂停**：指定秒数无新张后自动暂停，避免资源浪费。
+- **GPU 光流加速（可选）**：大分辨率下把角点+光流交给 OpenCV CUDA，
+  逐项自检通过才启用，失败自动回退 CPU；小帧不会硬上 GPU（实测更慢）。
+- **视频倍速播放**：0.5x / 1.0x / 1.5x / 2.0x，按视频时间戳换算墙钟节奏，
+  快放跟不上时自动丢帧。
 
 ## 安装
 
 ### 依赖
-项目需要 **Python 3.11**(其他没试过)，并安装以下库：
+项目需要 **Python 3.11**（其他版本未测试）：
 
 ```bash
 pip install -r requirements.txt
+pip install opencv-python==4.10.0.92   # 仅 CPU；GPU 见下方「GPU 加速」
 ```
+
+> 注意：官方 PyPI 的 `opencv-python` **不含 CUDA 模块**，
+> 想用 GPU 光流必须换成带 CUDA 的构建。
+
+### GPU 加速（可选）
+
+本项目在 RTX 3080 + CUDA 11.8 上使用自编译的 **OpenCV 4.10.0 CUDA** 构建：
+
+- `cv2.pyd` 与 `opencv_world4100.dll`（约 210MB，含 CUDA）放在
+  `.venv/Lib/site-packages/`，或放在项目下的 `opencv_dlls/`；
+- 运行时依赖 CUDA 11.8 的 `cublas64_11.dll` / `cufft64_10.dll` / `npp*.dll`，
+  由 `opencv_env.py` 自动从 `CUDA_PATH` 或 `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*`
+  里找最高版本并注册（**不能只靠 PATH**，Python 3.8+ 不再用 PATH 找扩展模块依赖）。
+
+验证：
+
+```bash
+python -c "import opencv_env, gpu_backend; print(gpu_backend.probe())"
+python tests/test_pipeline.py
+```
+
+`GPUInfo` 的 `diff/morph/warp/corners/flow` 全为 `True` 才说明 GPU 链路真的可用。
+自检没有通过时，主程序会直接按 CPU 运行，不会出现“设置里显示已启用 GPU”的假象。
+
+> **什么时候值得开 GPU**：GPU 只接管角点+稀疏光流，且要超过
+> `GPU_FLOW_MIN_PIXELS`（默认 20 万像素）才启用。实测 1080p + `SCALE_FACTOR=0.5`
+> 时检测尺寸只有 768x405，GPU 光流与 CPU 基本持平（甚至略慢）；
+> 4K 素材或调高缩放比例后 GPU 才有明显优势。批量离线提取建议直接用多进程。
 
 ### 项目文件结构
+
 ```
-cel_counter/
-├── main.py               # 单一合并文件（含全部逻辑）
-├── requirements.txt      # 依赖列表
-├── cel_counter_settings.json  # 运行时生成的配置
+ZSJC/
+├── main.py               # 主程序（GUI + 捕获循环 + 统计）
+├── config.py             # 全局配置、颜色管理器
+├── opencv_env.py         # OpenCV/CUDA DLL 搜索路径引导（必须先于 import cv2）
+├── gpu_backend.py        # GPU 能力自检 + 正确的 OpenCV CUDA 原语封装
+├── async_pipeline.py     # 异步运动分析流水线（双缓冲，可选）
+├── detection.py          # 差分/光流/哈希/缩放等过滤算法
+├── preview.py            # 实时预览渲染
+├── video_source.py       # 帧源（dxcam 实时 / OpenCV 视频 / FFmpeg NVDEC 管道）
+├── oped_detector.py      # OP/ED 检测与扣除
+├── record_manager.py     # 运行记录管理
+├── ui.py                 # 界面构建、设置窗口、截图区域选择
+├── widgets.py            # 可拖动面板
+├── extract.py            # 离线视频张数提取（CLI）
+├── extract_parallel.py   # 单文件多进程分段提取
+├── batch_extract.py      # kazumi 缓存批量处理（合并 TS + 并行提取）
+├── kazumi_processor.py   # 番剧缓存处理（GUI「导入番剧」用）
+├── diagnose.py           # 逐阶段性能诊断（CLI）
+├── build.py              # 多模块合并为单文件 ZhangShuJianCe.py
+├── tests/test_pipeline.py# 回归测试（GPU/CPU 一致性、端到端、视频帧源）
+├── 日志.md               # 开发日志与实测数据
+├── 项目分析报告.md       # 历史代码审查报告
+├── requirements.txt
 └── README.md
 ```
-
-逻辑模块划分（均合并于 main.py）：
-- config.py        # 全局配置、颜色管理器
-- detection.py     # 差分、光流、哈希、缩放等过滤算法
-- preview.py       # 实时预览渲染
-- ui.py            # GUI 界面（tkinter）
-- main.py          # 主程序入口与循环
 
 ## 快速上手
 
@@ -115,17 +162,42 @@ python main.py
 ### 7. 调整参数
 点击「设置」打开详细面板，保存后生效。
 
+## 离线批处理
+
+```bash
+# 单个视频，输出逐秒 CSV
+python extract.py 视频.mp4 -o result.csv
+python extract.py 视频.mp4 --no-gpu          # 强制 CPU
+python extract.py 视频.mp4 --nvdec           # 用 NVDEC 管道解码（默认不用）
+python extract.py 视频.mp4 --async           # 异步双缓冲（实测收益不稳定）
+
+# 单文件多进程分段（有 ~1% 边界误差）
+python extract_parallel.py 视频.mp4 -w 8 -o result.csv
+
+# 批量目录（每集 8 进程，逐集处理）
+python batch_extract.py --dir "E:\kazhumi Anime\554779_giriGiriLove" --scale 0.5
+
+# 性能诊断：看时间花在哪
+python diagnose.py 视频.mp4 --frames 720 --mode adaptive --gpu
+```
+
+`extract.py` 默认用 OpenCV 解码 + GPU 光流（若自检通过）；
+`--nvdec` 才走 FFmpeg NVDEC 管道——实测 1080p 下 NVDEC 的整帧回传比
+OpenCV 软解更慢。拿不到第一帧会自动回退。
+
 ## 核心参数说明
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | SCALE_FACTOR | 0.5 | 截图缩放比例，降低计算量 |
-| SSIM_THRESHOLD | 0.90 | 背景相似度阈值，用于局部变化过滤 |
+| SSIM_THRESHOLD | 0.93 | 背景相似度阈值，用于局部变化过滤 |
 | MIN_CHANGE_RATIO | 0.002 | 最小变化像素占比，低于此值判为无变化 |
 | SIGNIFICANT_CHANGE_RATIO | 0.02 | 大面积变化直接通过阈值 |
 | ALIGNED_CHANGE_THRESHOLD | 0.02 | 全局平移对齐后剩余变化面积上限，低于则视为纯平移运镜 |
 | BASIC_CORR_THRESHOLD | 0.995 | 基础检测快速相似度阈值 |
+| BASIC_MIN_RAW_RATIO_STILL | 0.004 | 基础检测判“极慢平移/静止”的变化占比上限 |
 | FULL_CORR_THRESHOLD | 0.998 | 完整检测快速相似度阈值 |
+| GLOBAL_SHIFT_MIN_PIXELS | 0.3 | 判定为全局平移的最小位移（像素） |
 | FLOW_FEATURE_COUNT | 150 | 光流法提取的特征点数量 |
 | HASH_THRESHOLD | 0 | 汉明距离阈值，≤此值视为重复帧（0 表示完全相同） |
 | FILTER_TRIGGER_WINDOW_MS | 200 | 触发完整过滤的时间窗口（毫秒） |
@@ -137,6 +209,8 @@ python main.py
 | OPED_HASH_MAX_DIST | 12 | 单个哈希汉明距离上限 |
 | OPED_HASH_WIN_RATIO | 0.6 | 窗口内相似帧比例要求 |
 | OPED_HISTORY_HOURS | 4 | 历史波形最长保存小时 |
+| GPU_ENABLED | False | 是否启用 GPU 光流（自检通过才会真正生效） |
+| GPU_FLOW_MIN_PIXELS | 200000 | 帧像素数低于此值不走 GPU 光流（实测小帧更慢） |
 
 完整列表见设置面板，由于参数不设限，乱填可能会引发不可名状的bug，调整时尽量小幅度调整，可随时恢复默认值。
 
@@ -145,9 +219,9 @@ python main.py
 1. **屏幕捕获**：dxcam 以最高帧率抓取屏幕区域，缩放至指定尺寸。
 2. **原始差分**：计算相邻帧绝对差，根据画面平均亮度自适应阈值二值化
 3. **基础检测**：
-   - 若归一化相关系数极高且变化面积极小 → 判为静止/极慢平移
-   - 若变化面积超过大面积阈值 → 直接判为新张。
-   - 否则标记为可疑，进入动态触发统计。
+   - 变化率低于最小阈值 → 静止。
+   - 变化率高于 `BASIC_MIN_RAW_RATIO_STILL` → 直接判为新张（不再白算相关系数）。
+   - 只有落在两者之间的小变化窗口，才算全局相关系数判断是否极慢平移。
 4. **动态触发**：在时间窗口内，若基础检测的新张计数达到阈值，则启动完整过滤。
 5. **完整检测**：
    - 全局平移对齐消除摄像机运镜；若对齐后变化极小 → 判为平移运镜。
@@ -155,14 +229,38 @@ python main.py
    - 光流方向一致性分析 → 同向运动判为多层运镜，过滤。
    - 光流径向一致性及位移-距离相关性 → 缩放运镜，过滤。
    - 剩余变化结合背景相似度判断是否为新作画。
-6. **哈希去重**：利用感知哈希（16x16）消除短时重复帧，严格模式下汉明距离必须为0。
-7. **OP/ED 检测**：
+6. **GPU 路径**：完整检测时如果帧够大（≥ `GPU_FLOW_MIN_PIXELS`）且 GPU 自检通过，
+   角点检测与两次光流在 GPU 上完成，其余判定和差分仍在 CPU——
+   这样两条路径共用同一套判定代码，不会出现逻辑分叉。
+7. **哈希去重**：利用感知哈希（16x16）消除短时重复帧，严格模式下汉明距离必须为0。
+8. **OP/ED 检测**：
    - 每秒计算当前帧的 64 位 pHash 并存储。
    - 定期用滑动窗口搜索历史哈希序列，寻找与最近窗口汉明距离最小的区间。
    - 通过状态机连续确认匹配区间，归入模板或新建模板。
    - 当区间长度达标（≥20秒）后，通过 FFT 互相关精确定位起止时间，扣除该区间内的累计张数和时长。
-8. **统计与显示**：计算每秒张数（扣除已识别OP/ED的时间与张数），更新波形，并分类统计各过滤原因的数量。
-9. **运行记录**：将当前会话的详细统计数据 保存为 JSON 记录，方便后续查阅。
+9. **统计与显示**：计算每秒张数（扣除已识别OP/ED的时间与张数），更新波形，并分类统计各过滤原因的数量。
+10. **运行记录**：将当前会话的详细统计数据保存为 JSON 记录，方便后续查阅。
+
+## 性能实测（RTX 3080 / Ryzen 7 9700X）
+
+检测 720 帧 1080p 视频（`tests` 同款合成素材，scale=0.5，检测尺寸 768x405）：
+
+| 路径 | 速度 | 张数 |
+|------|------|------|
+| 全部 CPU | 89 fps | 344 |
+| NVDEC 解码 + GPU 光流 | 105 fps | 336 |
+
+微基准（灰度图，Python 侧计时）：
+
+| 操作 | CPU | GPU |
+|------|-----|-----|
+| 差分+阈值+闭运算+countNonZero 324x576 | 0.044 ms | 0.80 ms |
+| 完整运动分析（角点+光流+对齐）324x576 | 2.68 ms | 2.52 ms |
+| 完整运动分析（角点+光流+对齐）540x960 | 8.14 ms | 3.18 ms |
+
+结论：**小帧的简单差分不要上 GPU**（上传+同步比计算还贵），
+只有大帧的光流才划算，所以代码里设了 `GPU_FLOW_MIN_PIXELS` 门槛。
+GPU 与 CPU 的光流实现不同，判定结果可能有 ~2% 的差异，属于正常范围。
 
 ## 自定义界面
 
@@ -178,8 +276,28 @@ python main.py
 - 关闭设置窗口或主窗口时，配置会自动保存至 `cel_counter_settings.json`。
 - OP/ED 检测依赖于重复出现的画面序列，对仅播放一次的片段无法自动识别。若误识别，可通过重置统计清除。
 - 运行记录保存在 `cel_counter_records.json`，手动编辑需谨慎，避免 JSON 格式错误。
+- GPU 自检在启动时执行一次（约 0.1~0.3 秒），失败项会打印在控制台，不会静默降级。
+
+## 更新日志
+
+### v0.2（2026-11-15）
+
+- **GPU 链路真正跑通**：新增 OpenCV CUDA 能力自检（角点/光流/对齐/差分逐项验证），
+  修正了 `threshold` 传 dst 不生效、`lk.calc` 参数缺失、GFTT 类名错误等问题；
+  自检不过就明确回退 CPU，不再出现「显示已启用 GPU、实际全在跑 CPU」。
+- **性能**：把完整检测里 23ms/次的带 mask `matchTemplate` 换成 numpy 实现的
+  `masked_corr`（0.6ms），同一视频 CPU 77→136 fps、GPU 92→156 fps，张数完全不变。
+- **批量提取**：修复 `extract_parallel` 合并统计错误（max→sum），新增
+  `batch_extract` 集号分组修复；6 集番剧（144 分钟）9.7 分钟跑完。
+- **NVDEC 丢帧修复**：ffprobe 字段解析错误曾导致按 1920x1080 读取 1280x720 视频，
+  58 秒视频只读到 776/1747 帧；现已修复并在 EOF 前自检帧数。
+- **B 站 m4s 直读**：自动剥掉文件头 9 字节 `000000000` 前缀。
+- **视频倍速**：0.5x~2.0x 按视频时间戳换算墙钟节奏，快放自动丢帧。
+- **测试**：新增 `tests/test_pipeline.py`，覆盖 GPU/CPU 一致性、端到端序列、
+  视频帧源与 seek，11 个用例全部通过。
+
+完整实测数据与踩坑记录见 [日志.md](日志.md)。
 
 ## 许可
 
 这个代码随便玩。
-```

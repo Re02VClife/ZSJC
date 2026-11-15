@@ -100,19 +100,17 @@ class OPEDDetector:
 
         t_now, h_now = self.hash_seq[-1]
 
-        # 自排除比较：仅比较排除窗口之前的历史，并提前终止循环
+        # 自排除比较：仅比较排除窗口之前的历史
+        # 限制搜索范围：最多回溯 7200 个样本（≈2小时 @ 1s间隔）
+        search_limit = min(len(self.hash_seq), 7200)
         matched = False
-        for t_hist, h_hist in reversed(self.hash_seq):
+        for i in range(len(self.hash_seq) - 1, max(len(self.hash_seq) - search_limit - 1, -1), -1):
+            t_hist, h_hist = self.hash_seq[i]
             if t_hist >= t_now - self_exclude:
                 continue  # 还在排除窗口内，跳过
-            if bin(h_now ^ h_hist).count('1') <= enter_dist:
+            if (h_now ^ h_hist).bit_count() <= enter_dist:
                 matched = True
                 break
-            # 因为时间是递增的，一旦遇到早于排除窗口的时间，后续不需要再判断排除窗口
-            if t_hist < t_now - self_exclude:
-                # 如果这一条没匹配上，后续的更早记录也可能匹配，所以不能 break
-                # 但我们可以根据匹配逻辑继续，不优化退出
-                pass
 
         if matched:
             self.match_streak += 1
@@ -172,7 +170,7 @@ class OPEDDetector:
                     continue
                 similar = 0
                 for i in range(min_len):
-                    if bin(query_hashes[i] ^ tpl_hashes[i]).count('1') <= max_dist:
+                    if (query_hashes[i] ^ tpl_hashes[i]).bit_count() <= max_dist:
                         similar += 1
                 ratio = similar / min_len
                 if ratio > best_ratio:

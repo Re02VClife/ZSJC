@@ -1,4 +1,18 @@
-opencv-python==4.13.0.92
+# 基础依赖（只跑 CPU 检测时够用）
 numpy==2.4.6
 Pillow==12.2.0
 dxcam==0.3.0
+
+# OpenCV 不在这里固定版本，因为 GPU 加速需要带 CUDA 的构建，
+# 官方 PyPI wheel（opencv-python / opencv-contrib-python）不含 CUDA 模块。
+#
+#   只跑 CPU：
+#       pip install opencv-python==4.10.0.92
+#
+#   要 GPU 光流：
+#       使用自编译的 OpenCV CUDA 构建（本机为 OpenCV 4.10.0 + CUDA 11.8，
+#       cv2.pyd + opencv_world4100.dll 放在 .venv/Lib/site-packages，
+#       或放到项目下的 opencv_dlls/）。
+#       安装后用 `python tests/test_pipeline.py` 验证 GPUInfo 各项是否为 True。
+#
+# 详见 README.md 的「GPU 加速」一节。

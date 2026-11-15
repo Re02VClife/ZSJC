@@ -91,6 +91,7 @@ CONFIG = {
 
     "FULL_CORR_THRESHOLD": 0.998,       # 完整检测快速相似度阈值
     "FULL_STILL_RATIO": 0.002,           # 完整检测静止变化面积阈值
+    "GLOBAL_SHIFT_MIN_PIXELS": 0.3,     # 判定为全局平移的最小位移（像素）
 
     # ========== 局部运动判断 ==========
     "LOCAL_AREA_THRESH": 0.003,         # 局部运动判断：最大连通域面积占比下限
@@ -145,10 +146,15 @@ CONFIG = {
     "VIDEO_FILE_PATH": "",                # 上次打开的视频文件路径
     "VIDEO_PLAYBACK_SPEED": 1.0,          # 倍速播放（1.0=原速）
     "VIDEO_SEEK_ENABLED": True,           # 允许拖拽进度条
+    "VIDEO_HW_ACCEL": True,               # 视频硬件加速解码（D3D11/FFmpeg）
 
     # ========== GPU 加速 ==========
-    "GPU_ENABLED": False,                 # 是否启用 GPU 加速（需 OpenCV CUDA）
+    "GPU_ENABLED": False,                 # 是否启用 GPU 加速（需 OpenCV CUDA 版，见 README）
     "GPU_FORCE_FALLBACK": False,         # 即使检测到 GPU 也强制使用 CPU（用于测试）
+    "GPU_FLOW_MIN_PIXELS": 200000,       # 帧像素数低于此值不走 GPU 光流（实测小帧 GPU 反而慢）
+
+    # ========== 番剧导入 ==========
+    "KAZUMI_PARALLEL_WORKERS": 4,        # 番剧导入并行分段数（1=串行，>1=多线程分段处理）
     # ========== 颜色方案 ==========
     "COLORS": {
         "accent": "#E6397C",

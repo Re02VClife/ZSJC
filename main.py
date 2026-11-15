@@ -4,12 +4,13 @@
 # 功能说明：dxcam捕获、多重过滤非新作画帧、实时预览、UI交互一体化工具
 # 模块组成：config.py / widgets.py / detection.py / preview.py / ui.py / video_source.py / oped_detector.py / record_manager.py / main.py
 # ==============================================================================
-import cv2
-print(cv2.cuda.getCudaEnabledDeviceCount())  # 输出 >0 表示支持 CUDA
+import sys, os
+import opencv_env  # 注册 OpenCV/CUDA DLL 搜索路径（必须先于 import cv2）
 
+import cv2
 cv2.setNumThreads(6)          # 调用cpu线程数
-cv2.ocl.setUseOpenCL(False)   # 若 GPU 光流已手动管理，关闭 OpenCL 避免冲突
-import sys, os, time, threading, json, copy, subprocess
+cv2.ocl.setUseOpenCL(False)   # GPU 光流由 OpenCV CUDA 管理，关闭 OpenCL 避免抢占
+import time, threading, json, copy, subprocess
 from collections import deque
 import csv
 import cv2
@@ -19,9 +20,11 @@ import tkinter.messagebox as messagebox
 
 # 添加自定义模块导入
 from config import CONFIG, color_manager, get_settings_path, CONFIG_DEFAULT
-from detection import ( compute_all_hashes,is_raw_change, basic_is_new_cel, full_is_new_cel,unified_motion_analysis)
+from detection import (compute_all_hashes, is_raw_change, basic_is_new_cel,
+                      full_is_new_cel, compute_diff_mask,
+                      GPUContext, gpu_probe)
 from preview import PreviewManager
-from video_source import FrameSource
+from video_source import FrameSource, FFmpegNvDecSource
 from oped_detector import OPEDDetector
 from record_manager import RecordManager
 from ui import (build_main_ui, create_video_controls, create_settings_window,
@@ -41,9 +44,14 @@ class AnimeCelCounter:
     """动画作画张数计数器主类，负责屏幕捕获、变化检测、统计与UI"""
 
     def __init__(self):
-        import cProfile
-        self.profiler = cProfile.Profile()
-        self.profiler.enable()
+        # 性能分析：仅在设置环境变量 CEL_PROFILE=1 时启用（省 5-15% CPU）
+        self._profile_enabled = os.environ.get("CEL_PROFILE", "") == "1"
+        if self._profile_enabled:
+            import cProfile
+            self.profiler = cProfile.Profile()
+            self.profiler.enable()
+        else:
+            self.profiler = None
 
         # ---------- 基础路径与拖拽数据 ----------
         if getattr(sys, 'frozen', False):
@@ -57,8 +65,6 @@ class AnimeCelCounter:
         self._stop_event = threading.Event()
         self._run_event = threading.Event()
         self._run_event.set()
-        self.time_lock = threading.Lock()
-        self.skip_until_elapsed = 0.0
 
         # 时钟锁，保护 _current_clock 读写
         self.clock_lock = threading.Lock()
@@ -157,22 +163,36 @@ class AnimeCelCounter:
         # ========== 视频模式与 GPU 初始化 ==========
         self.video_mode = CONFIG.get("VIDEO_MODE", False)
         self.video_file_path = CONFIG.get("VIDEO_FILE_PATH", "")
-        self.use_gpu = CONFIG.get("GPU_ENABLED", False) and self._check_gpu_usable()
+        # GPU：先逐项自检（GPUInfo），只有光流链路真的可用才启用。
+        # 这样不会再出现"设置里显示 GPU 已启用、实际全部在 CPU 跑"的情况。
+        self.gpu_info = gpu_probe()
+        gpu_allowed = not CONFIG.get("GPU_FORCE_FALLBACK", False)
+        self.use_gpu = bool(gpu_allowed and self.gpu_info.flow_ready)
+        CONFIG["GPU_ENABLED"] = self.use_gpu
+
         self.frame_source = None
         self.video_controls = None
-        self.video_clock = 0.0
         self.video_is_playing = True
         self.video_playback_speed = CONFIG.get("VIDEO_PLAYBACK_SPEED", 1.0)
         self._realtime_elapsed = 0.0
         self._last_capture_time = None
+        # 视频倍速节流基准 (墙钟, 视频时间戳) 与丢帧计数
+        self._video_pace_origin = None
+        self._video_dropped_frames = 0
 
-        # 创建 GPU 光流对象（如果启用且可用）
+        # ─── GPU 上下文：缓存 GpuMat / 光流 / 角点检测器 ───
+        self.gpu_ctx = None
         self.lk_cuda = None
         if self.use_gpu:
             try:
-                self.lk_cuda = cv2.cuda.SparsePyrLKOpticalFlow.create(winSize=(21,21), maxLevel=3, iters=30)
-            except:
+                self.gpu_ctx = GPUContext(self.gpu_info)
+                self.lk_cuda = self.gpu_ctx.lk
+            except Exception as e:  # noqa: BLE001
                 self.use_gpu = False
+                self.gpu_ctx = None
+                self.lk_cuda = None
+                print(f"[GPU] 初始化失败: {e}，回退 CPU")
+        print(f"[GPU] {self.gpu_info.summary()}；运动分析={'GPU 光流' if self.use_gpu else 'CPU'}")
 
         # 如果配置为视频模式，尝试初始化帧源
         if self.video_mode and self.video_file_path:
@@ -258,12 +278,8 @@ class AnimeCelCounter:
         return get_settings_path()
 
     def _check_gpu_usable(self):
-        try:
-            dummy = np.zeros((100, 100), dtype=np.uint8)
-            unified_motion_analysis(dummy, dummy, use_optical_flow=True, use_gpu=True)
-            return True
-        except:
-            return False
+        """GPU 能力自检（真实跑一遍角点+光流+对齐，而不是只创建对象）。"""
+        return gpu_probe()
 
     def load_settings(self):
         try:
@@ -336,11 +352,36 @@ class AnimeCelCounter:
         buttons_info = [
             ("关闭", self._on_close),
             ("设置", self.open_settings),
+            ("导入番剧", self._import_anime_cache),
             ("导入视频", self._import_video),
             (pause_text, self.pause),
             ("重置统计", self.reset_stats)
         ]
         accent = color_manager.get_color('accent')
+
+        self._btn_rects = []
+        self._btn_texts = []
+        self._submenu_hide_id = None
+
+        def _show_sub():
+            if self._submenu_hide_id:
+                canvas.after_cancel(self._submenu_hide_id)
+                self._submenu_hide_id = None
+            for i in range(2, len(self._btn_rects)):
+                canvas.itemconfigure(self._btn_rects[i], state='normal')
+                canvas.itemconfigure(self._btn_texts[i], state='normal')
+
+        def _hide_sub():
+            if self._submenu_hide_id:
+                canvas.after_cancel(self._submenu_hide_id)
+            self._submenu_hide_id = canvas.after(500, _do_hide)
+
+        def _do_hide():
+            self._submenu_hide_id = None
+            for i in range(2, len(self._btn_rects)):
+                canvas.itemconfigure(self._btn_rects[i], state='hidden')
+                canvas.itemconfigure(self._btn_texts[i], state='hidden')
+
         for i, (text, cmd) in enumerate(buttons_info):
             y0 = 5 + i * (btn_h + gap)
             y1 = y0 + btn_h
@@ -351,6 +392,13 @@ class AnimeCelCounter:
                                          text=text, fill=accent,
                                          font=("Arial", 9, "bold"),
                                          activefill="#FFD700")
+            self._btn_rects.append(rect_id)
+            self._btn_texts.append(text_id)
+
+            # 隐藏"设置"下方的按钮（i>=2）
+            if i >= 2:
+                canvas.itemconfigure(rect_id, state='hidden')
+                canvas.itemconfigure(text_id, state='hidden')
 
             def safe_cmd(cmd):
                 if not self._drag_data['dragging']:
@@ -358,14 +406,123 @@ class AnimeCelCounter:
 
             canvas.tag_bind(rect_id, "<ButtonRelease-1>", lambda e, c=cmd: safe_cmd(c))
             canvas.tag_bind(text_id, "<ButtonRelease-1>", lambda e, c=cmd: safe_cmd(c))
+
+            # 悬停高亮 + 子菜单展开/收起（i>=1 是设置及子菜单）
             canvas.tag_bind(rect_id, "<Enter>",
-                            lambda e, r=rect_id: canvas.itemconfig(r, fill="#111111"))
+                            lambda e, r=rect_id, idx=i: _on_enter(r, idx))
             canvas.tag_bind(rect_id, "<Leave>",
-                            lambda e, r=rect_id: canvas.itemconfig(r, fill=""))
+                            lambda e, r=rect_id, idx=i: _on_leave(r, idx))
             canvas.tag_bind(text_id, "<Enter>",
-                            lambda e, r=rect_id: canvas.itemconfig(r, fill="#A12F2F"))
+                            lambda e, r=rect_id, idx=i: _on_enter(r, idx))
             canvas.tag_bind(text_id, "<Leave>",
-                            lambda e, r=rect_id: canvas.itemconfig(r, fill=""))
+                            lambda e, r=rect_id, idx=i: _on_leave(r, idx))
+
+        def _on_enter(rect_id, idx):
+            canvas.itemconfig(rect_id, fill="#111111")
+            if idx >= 1:
+                _show_sub()
+
+        def _on_leave(rect_id, idx):
+            canvas.itemconfig(rect_id, fill="")
+            if idx >= 1:
+                _hide_sub()
+
+    def _import_anime_cache(self):
+        """导入番剧缓存目录（kazumi TS 分片）进行离线检测"""
+        from tkinter import filedialog, simpledialog
+        from kazumi_processor import KazumiProcessor, find_video_files
+
+        # 默认路径
+        default_dir = os.path.join(os.environ.get("APPDATA", ""),
+                                   "com.example", "kazumi", "downloads")
+        directory = filedialog.askdirectory(
+            title="选择番剧缓存目录（支持 seg_*.ts / *.mp4）",
+            initialdir=default_dir if os.path.isdir(default_dir) else None)
+        if not directory:
+            return
+
+        # 扫描视频文件
+        video_files, file_type = find_video_files(directory)
+        if not video_files:
+            messagebox.showerror("错误", f"未找到视频文件:\n{directory}\n\n请选择包含 seg_*.ts 或 *.mp4 的目录")
+            return
+        file_label = "TS分片" if file_type == 'ts' else "MP4"
+
+        # 确认
+        ok = messagebox.askyesno(
+            "确认处理",
+            f"找到 {len(video_files)} 个{file_label}文件\n\n"
+            f"将离线检测作画张数（scale={CONFIG['SCALE_FACTOR']}）\n"
+            f"期间界面可能短暂卡顿\n\n是否继续？")
+        if not ok:
+            return
+
+        # 进度窗口
+        prog_win = tk.Toplevel(self.root)
+        prog_win.title("番剧缓存处理")
+        prog_win.geometry("500x220")
+        prog_win.configure(bg=color_manager.get_color('bg'))
+        prog_win.transient(self.root)
+        prog_win.grab_set()
+        prog_win.attributes("-topmost", True)
+
+        accent = color_manager.get_color('accent')
+        bg = color_manager.get_color('bg')
+        btn_bg = color_manager.get_color('btn_bg')
+
+        tk.Label(prog_win, text="番剧缓存处理中...", font=("Arial", 11, "bold"),
+                 fg=accent, bg=bg).pack(pady=(15, 5))
+
+        phase_label = tk.Label(prog_win, text="准备中...", fg=accent, bg=bg, font=("Arial", 9))
+        phase_label.pack()
+
+        info_label = tk.Label(prog_win, text="", fg=accent, bg=bg, font=("Arial", 9))
+        info_label.pack(pady=(5, 10))
+
+        # 进度条（Canvas 手绘）
+        bar_canvas = tk.Canvas(prog_win, width=400, height=24, bg=btn_bg, highlightthickness=0)
+        bar_canvas.pack(pady=5)
+        bar_rect = bar_canvas.create_rectangle(0, 0, 0, 24, fill=accent, outline="")
+
+        pct_label = tk.Label(prog_win, text="0%", fg=accent, bg=bg, font=("Arial", 9))
+        pct_label.pack()
+
+        cancel_btn = tk.Button(prog_win, text="取消", bg=btn_bg, fg=accent,
+                               font=("Arial", 9))
+        cancel_btn.pack(pady=10)
+
+        # 处理器（线程安全：通过 root.after 投递 UI 更新）
+        processor = KazumiProcessor()
+
+        def on_progress(phase, percent, msg):
+            """回调：工作线程调用 → root.after 投递到主线程"""
+            def _update():
+                if not prog_win.winfo_exists():
+                    return
+                try:
+                    phase_label.config(text=f"[{phase}] {msg}")
+                    bar_canvas.coords(bar_rect, 0, 0, int(400 * percent / 100), 24)
+                    pct_label.config(text=f"{percent:.0f}%")
+                    if phase == "完成":
+                        cancel_btn.config(text="关闭", command=lambda: on_done(None))
+                except Exception:
+                    pass
+            self.root.after(1, _update)
+
+        def on_done(report):
+            """完成：关闭进度窗，显示报告"""
+            if prog_win.winfo_exists():
+                prog_win.destroy()
+            if report:
+                _show_kazumi_report(self, report)
+
+        cancel_btn.config(command=processor.cancel)
+        processor.cb_progress = on_progress
+        processor.cb_done = on_done
+        processor.process(directory, scale=0.5)
+
+        # 防止被 GC
+        self._kazumi_processor = processor
 
     def _import_video(self):
         from tkinter import filedialog
@@ -375,11 +532,24 @@ class AnimeCelCounter:
         try:
             if self.frame_source:
                 self.frame_source.close()
-            self.frame_source = FrameSource(mode='video', video_path=file_path,
-                                            scale_factor=CONFIG["SCALE_FACTOR"],
-                                            use_gpu=self.use_gpu,
-                                            hw_accel=CONFIG.get("VIDEO_HW_ACCEL", True),
-                                            hash_enabled=(self.use_hash_filter or CONFIG.get("OPED_HASH_ENABLED", True)))
+            # ─── 优先尝试 NVDEC 管道（GPU 硬解+缩放，最快）───
+            if self.use_gpu:
+                try:
+                    self.frame_source = FFmpegNvDecSource(
+                        video_path=file_path,
+                        scale_factor=CONFIG["SCALE_FACTOR"],
+                        hash_enabled=(self.use_hash_filter or CONFIG.get("OPED_HASH_ENABLED", True)))
+                    print("[导入] 使用 FFmpeg NVDEC 硬解管道")
+                except Exception as e:
+                    print(f"[导入] NVDEC 管道失败 ({e})，回退 OpenCV")
+                    self.frame_source = None
+            # 回退：OpenCV VideoCapture
+            if self.frame_source is None:
+                self.frame_source = FrameSource(mode='video', video_path=file_path,
+                                                scale_factor=CONFIG["SCALE_FACTOR"],
+                                                use_gpu=self.use_gpu,
+                                                hw_accel=CONFIG.get("VIDEO_HW_ACCEL", True),
+                                                hash_enabled=(self.use_hash_filter or CONFIG.get("OPED_HASH_ENABLED", True)))
             self.video_mode = True
             self.frame_shape = self.frame_source.frame_shape
             self.reset_stats()
@@ -1037,14 +1207,31 @@ class AnimeCelCounter:
                     time.sleep(0.001)
                     continue
                 ts, now_frame, bgr_raw, v_hash_256, v_oped_hash = frame_data
-                # 使用帧源提供的哈希，不再重复计算
-                hash_256 = v_hash_256 if self.use_hash_filter else None
-                oped_hash = v_oped_hash if CONFIG.get("OPED_HASH_ENABLED", True) else None
                 if ts is None or ts < 0:
                     ts = 0.0
                 if not self.video_is_playing:
                     time.sleep(0.001)
                     continue
+
+                # ─── 倍速播放：把视频时间戳换算成墙钟节奏 ───
+                speed = max(0.05, float(self.video_playback_speed or 1.0))
+                if speed != 1.0:
+                    if self._video_pace_origin is None:
+                        self._video_pace_origin = (time.perf_counter(), ts)
+                    wall0, ts0 = self._video_pace_origin
+                    target = wall0 + max(0.0, ts - ts0) / speed
+                    now_wall = time.perf_counter()
+                    if target > now_wall:
+                        # 慢放：等到目标时刻再处理（单次最多 50ms，保证暂停响应）
+                        time.sleep(min(target - now_wall, 0.05))
+                    elif speed > 1.0 and now_wall - target > 0.5:
+                        # 快放：处理速度跟不上时丢帧，保持播放进度
+                        self._video_dropped_frames += 1
+                        continue
+
+                # 使用帧源提供的哈希，不再重复计算
+                hash_256 = v_hash_256 if self.use_hash_filter else None
+                oped_hash = v_oped_hash if CONFIG.get("OPED_HASH_ENABLED", True) else None
                 with self.clock_lock:
                     self._current_clock = ts
             else:
@@ -1060,10 +1247,13 @@ class AnimeCelCounter:
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     now_frame = cv2.resize(gray, (0, 0), fx=CONFIG["SCALE_FACTOR"], fy=CONFIG["SCALE_FACTOR"])
                 ts = time.time()
-                if not hasattr(self, '_last_capture_time') or self._last_capture_time is None:
+                if self._last_capture_time is None:
                     self._last_capture_time = ts
                     self._realtime_elapsed = 0.0
                 dt = ts - self._last_capture_time
+                # 防止暂停/休眠后时间跳跃：dt > 2s 视为从暂停恢复
+                if dt > 2.0:
+                    dt = 0.0
                 self._last_capture_time = ts
                 self._realtime_elapsed += dt
                 with self.clock_lock:
@@ -1072,9 +1262,9 @@ class AnimeCelCounter:
                 if self.use_hash_filter or CONFIG.get("OPED_HASH_ENABLED", True):
                     hash_256, oped_hash = compute_all_hashes(now_frame)
 
-            # 获取上一帧
+            # 获取上一帧（不复制，last_frame 在写入时已是独立副本）
             with self.lock:
-                last = self.last_frame.copy() if self.last_frame is not None else None
+                last = self.last_frame if self.last_frame is not None else None
             if last is not None and last.shape != now_frame.shape:
                 last = None
 
@@ -1083,26 +1273,50 @@ class AnimeCelCounter:
             move_type = "静止"
 
             if last is not None:
-                raw_detected = is_raw_change(last, now_frame)
+                # ─── 差分统一走 CPU ───
+                # 实测 324x576：CPU 0.044ms / GPU 0.80ms。小帧上两次 upload
+                # 加一次 countNonZero 同步的开销远大于计算本身，GPU 只适合
+                # 完整检测里的角点+稀疏光流（大帧才有收益）。
+                _, _, precomputed_ratio = compute_diff_mask(last, now_frame)
+
+                raw_detected = is_raw_change(last, now_frame, precomputed_ratio=precomputed_ratio)
                 raw_new_cel = 1 if raw_detected else 0
 
-                basic_detected, move_type = basic_is_new_cel(last, now_frame)
+                basic_detected, move_type = basic_is_new_cel(last, now_frame, precomputed_ratio=precomputed_ratio)
                 if basic_detected:
-                    self.raw_detection_timestamps.append(self._current_clock)
+                    with self.clock_lock:
+                        self.raw_detection_timestamps.append(self._current_clock)
 
+                with self.clock_lock:
+                    clock_safe = self._current_clock
                 window_sec = CONFIG["FILTER_TRIGGER_WINDOW_MS"] / 1000.0
-                while self.raw_detection_timestamps and self.raw_detection_timestamps[0] < self._current_clock - window_sec:
+                while self.raw_detection_timestamps and self.raw_detection_timestamps[0] < clock_safe - window_sec:
                     self.raw_detection_timestamps.popleft()
 
                 if len(self.raw_detection_timestamps) >= CONFIG["FILTER_TRIGGER_COUNT"]:
                     if not self.full_filter_active:
                         self.full_filter_active = True
-                    self.full_filter_active_until = self._current_clock + CONFIG["FULL_FILTER_HOLD_SEC"]
-                elif self.full_filter_active and self._current_clock > self.full_filter_active_until:
+                    self.full_filter_active_until = clock_safe + CONFIG["FULL_FILTER_HOLD_SEC"]
+                elif self.full_filter_active and clock_safe > self.full_filter_active_until:
                     self.full_filter_active = False
 
                 if self.full_filter_active:
-                    final_detected, move_type = full_is_new_cel(last, now_frame, self.use_optical_flow, use_gpu=self.use_gpu, lk_cuda=self.lk_cuda)
+                    # GPU 路径：按像素数门槛决定是否上传（小帧上传反而更慢）
+                    gpu_ctx = self.gpu_ctx
+                    frames_uploaded = False
+                    if (self.use_gpu and gpu_ctx is not None
+                            and gpu_ctx.usable_for_flow(now_frame.shape)):
+                        try:
+                            gpu_ctx.upload_pair(last, now_frame)
+                            frames_uploaded = True
+                        except Exception:  # noqa: BLE001
+                            frames_uploaded = False
+                    final_detected, move_type = full_is_new_cel(
+                        last, now_frame, self.use_optical_flow,
+                        use_gpu=self.use_gpu, lk_cuda=self.lk_cuda,
+                        precomputed_ratio=precomputed_ratio,
+                        gpu_ctx=gpu_ctx if frames_uploaded else None,
+                        frames_uploaded=frames_uploaded)
                 else:
                     final_detected = basic_detected
 
@@ -1184,12 +1398,7 @@ class AnimeCelCounter:
                 self.oped_detector.sample(clock, fc, rc, oped_hash)
                 self.instant_fps_history.append((clock, self.current_cels))
 
-            # 视频播放倍速简单实现：通过 sleep 控制帧率
-            if self.video_mode and self.video_is_playing:
-                # 基于视频时间戳计算睡眠时间，实现倍速
-                # 简化：每帧后 sleep 一段时间
-                # 实际应该计算目标播放速度下的帧间隔，但这里仅示例
-                pass
+            # 视频倍速已在取帧处按「视频时间戳 → 墙钟」的节奏实现（见上方 throttle）
 
     # ==================== UI 更新与波形 ====================
     def loop(self):
@@ -1331,22 +1540,33 @@ class AnimeCelCounter:
         total_dur = self.frame_source.video_duration
         pos = float(value) / 100.0 * total_dur
         self.frame_source.seek(pos)
-        # Seek 后重置状态，避免统计错乱
-        self.reset_stats()
-        self._last_recorded_time = -1
+        # 轻量重置：保留 OP/ED 模板，仅清除帧计数和统计状态
         with self.lock:
-            self.last_frame = None
             self.recent_frames.clear()
             self.recent_sum = 0
+            self.current_cels = 0.0
             self.recent_frames_raw.clear()
             self.recent_sum_raw = 0
-            self.current_cels = 0.0
             self.current_raw_cels = 0.0
+            self.last_frame = None
+            self.frame_buffer.clear()
+        self.total_sum = 0.0
+        self.total_count = 0
+        self._last_recorded_time = -1
+        self.full_filter_active = False
+        self.full_filter_active_until = 0
+        self.raw_detection_timestamps.clear()
+        self.idle_start_time = None
+        # 倍速节流基准重置，否则 seek 后墙钟目标会落后一大截，疯狂丢帧
+        self._video_pace_origin = None
+        self._video_dropped_frames = 0
 
     def _on_speed_change(self, value):
-        speed = float(value.replace('x', ''))
+        speed = float(str(value).replace('x', ''))
         CONFIG["VIDEO_PLAYBACK_SPEED"] = speed
         self.video_playback_speed = speed
+        # 换挡时重新建立基准，避免沿用旧节奏
+        self._video_pace_origin = None
 
     def pause_video(self):
         self.video_is_playing = False
@@ -1365,16 +1585,50 @@ class AnimeCelCounter:
         self.last_loop_time = time.time()
         if self.frame_source:
             self.frame_source.resume()
+        # 恢复播放时重置节流基准，避免把暂停时长算进播放进度
+        self._video_pace_origin = None
         if self.video_controls:
             self.video_controls['play_var'].set(True)
             self.video_controls['play_btn'].config(text="⏸")
 
     def _save_gpu_video_config(self, gpu_enabled, speed_str):
-        CONFIG["GPU_ENABLED"] = gpu_enabled
         try:
-            CONFIG["VIDEO_PLAYBACK_SPEED"] = float(speed_str)
-        except:
+            speed = float(str(speed_str).replace('x', ''))
+            CONFIG["VIDEO_PLAYBACK_SPEED"] = speed
+            self.video_playback_speed = speed
+            self._video_pace_origin = None
+        except (TypeError, ValueError):
             pass
+
+        info = gpu_probe()
+        self.gpu_info = info
+        want_gpu = bool(gpu_enabled) and info.flow_ready
+        if gpu_enabled and not info.flow_ready:
+            messagebox.showwarning(
+                "GPU 不可用",
+                f"{info.summary()}\n\n"
+                "自检未通过，已保持 CPU 模式（不会假装启用）。\n"
+                "可用 `python tests/test_pipeline.py` 查看具体失败项。")
+        CONFIG["GPU_ENABLED"] = want_gpu
+        if want_gpu and not self.use_gpu:
+            try:
+                self.gpu_ctx = GPUContext(info)
+                self.lk_cuda = self.gpu_ctx.lk
+                self.use_gpu = True
+            except Exception as e:  # noqa: BLE001
+                print(f"[GPU] 启用失败: {e}，保持 CPU")
+                self.use_gpu = False
+                self.gpu_ctx = None
+                self.lk_cuda = None
+        elif not want_gpu and self.use_gpu:
+            if self.gpu_ctx is not None:
+                try:
+                    self.gpu_ctx.release()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.gpu_ctx = None
+            self.lk_cuda = None
+            self.use_gpu = False
         self._save_all_settings()
 
     def pause(self):
@@ -1453,9 +1707,6 @@ class AnimeCelCounter:
         self.oped_detector.reset()
         self.instant_fps_history.clear()
 
-        with self.time_lock:
-            self.skip_until_elapsed = 0.0
-
         accent = color_manager.get_color('accent')
         self.lb_rt.config(text="实时张数：0.0 ")
         self.lb_total_time.config(text="运行时长：0.0 s")
@@ -1477,14 +1728,15 @@ class AnimeCelCounter:
 
         if self.video_mode and self.frame_source:
             self.frame_source.seek(0)
-            self.video_clock = 0.0
 
     def _save_profile(self):
+        if not self._profile_enabled or self.profiler is None:
+            return
         try:
             self.profiler.disable()
             self.profiler.dump_stats("profile_output.prof")
             print("[Profiler] 数据已保存至 profile_output.prof")
-        except:
+        except Exception:
             pass
 
     def _on_close(self):
@@ -1494,6 +1746,11 @@ class AnimeCelCounter:
         self.preview_manager.stop()
         if self.frame_source:
             self.frame_source.close()
+        if self.gpu_ctx is not None:
+            try:
+                self.gpu_ctx.release()
+            except Exception:
+                pass
         if hasattr(self, 'capture_thread') and self.capture_thread.is_alive():
             self.capture_thread.join(timeout=2.0)
         if hasattr(self.preview_manager, 'thread') and self.preview_manager.thread and self.preview_manager.thread.is_alive():
@@ -1575,7 +1832,7 @@ class AnimeCelCounter:
                               CONFIG["WAVE2_HISTORY_SEC"], CONFIG["WAVE_MAX_Y"], "25min")
 
     def _draw_wave_multi(self, canvas, data_list, history_sec, y_max, title=""):
-        canvas.delete("all")
+        """增量波形绘制：仅重绘数据线和OP/ED高亮，保留坐标轴"""
         width = canvas.winfo_width()
         height = canvas.winfo_height()
         if width < 50 or height < 50:
@@ -1588,10 +1845,26 @@ class AnimeCelCounter:
         now = self._current_clock
         start = now - history_sec
         accent = color_manager.get_color('accent')
-        self._draw_axes_only(canvas, plot_w, plot_h, y_max, accent)
-        if title:
-            canvas.create_text(self.wave_margin_left, self.wave_margin_top - 5,
-                               text=title, fill=accent, font=("Arial", 8), anchor="nw")
+
+        # 检查是否需要重建坐标轴（尺寸变化或首次绘制）
+        if not hasattr(canvas, '_wave_plot_w') or canvas._wave_plot_w != plot_w or canvas._wave_plot_h != plot_h:
+            canvas.delete("all")
+            self._draw_axes_only(canvas, plot_w, plot_h, y_max, accent)
+            if title:
+                canvas.create_text(self.wave_margin_left, self.wave_margin_top - 5,
+                                   text=title, fill=accent, font=("Arial", 8), anchor="nw")
+            canvas._wave_plot_w = plot_w
+            canvas._wave_plot_h = plot_h
+            canvas._wave_data_ids = []
+            canvas._wave_oped_ids = []
+        else:
+            # 增量更新：仅清除数据线和OP/ED高亮
+            for item_id in getattr(canvas, '_wave_data_ids', []):
+                canvas.delete(item_id)
+            for item_id in getattr(canvas, '_wave_oped_ids', []):
+                canvas.delete(item_id)
+        canvas._wave_data_ids = []
+        canvas._wave_oped_ids = []
 
         if CONFIG["OPED_DETECTION_ENABLED"]:
             mark_color = "#FFD700"
@@ -1602,16 +1875,18 @@ class AnimeCelCounter:
                     x1 = self.wave_margin_left + plot_w * (max(s, start_t) - start_t) / history_sec
                     x2 = self.wave_margin_left + plot_w * (min(e, now) - start_t) / history_sec
                     color = seg_colors.get(sid, mark_color)
-                    canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
-                                            fill=color, outline="", stipple="gray25")
+                    rid = canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
+                                                  fill=color, outline="", stipple="gray25")
+                    canvas._wave_oped_ids.append(rid)
             if self.oped_detector.match_active and self.oped_detector.match_start is not None:
                 current_duration = now - self.oped_detector.match_start
                 if current_duration >= 10:
                     x1 = self.wave_margin_left + plot_w * (max(self.oped_detector.match_start, start_t) - start_t) / history_sec
                     x2 = self.wave_margin_left + plot_w * (min(now, now) - start_t) / history_sec
                     color = seg_colors.get(self.oped_detector.pending_id, '#FFD700') if self.oped_detector.pending_id is not None else '#FFD700'
-                    canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
-                                            fill=color, outline="", stipple="gray25")
+                    rid = canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
+                                                  fill=color, outline="", stipple="gray25")
+                    canvas._wave_oped_ids.append(rid)
 
         for wave_data, color in data_list:
             points = [(t, v) for t, v in wave_data if start <= t <= now]
@@ -1628,7 +1903,8 @@ class AnimeCelCounter:
                     y = plot_h - (max(buckets[x]) / y_max) * plot_h
                     line_pts.append((self.wave_margin_left + x, self.wave_margin_top + y))
             if len(line_pts) >= 2:
-                canvas.create_line(line_pts, fill=color, width=1, smooth=False)
+                lid = canvas.create_line(line_pts, fill=color, width=1, smooth=False)
+                canvas._wave_data_ids.append(lid)
 
     def _draw_axes_only(self, canvas, plot_w, plot_h, y_max, accent):
         canvas.create_line(self.wave_margin_left, self.wave_margin_top,
@@ -1793,6 +2069,129 @@ class AnimeCelCounter:
         if hasattr(self, '_settings_win') and self._settings_win is not None and self._settings_win.winfo_exists():
             refresh_ms = int(CONFIG["TOTAL_WAVE_REFRESH_SEC"] * 1000)
             self.root.after(refresh_ms, self._draw_settings_wave)
+
+def _show_kazumi_report(counter, report):
+    """显示番剧缓存处理结果报告窗口"""
+    import tkinter as tk
+    import tkinter.ttk as ttk
+
+    win = tk.Toplevel(counter.root)
+    win.title("番剧检测报告")
+    win.geometry("600x500")
+    win.configure(bg=color_manager.get_color('bg'))
+    win.transient(counter.root)
+    win.grab_set()
+
+    accent = color_manager.get_color('accent')
+    bg = color_manager.get_color('bg')
+    btn_bg = color_manager.get_color('btn_bg')
+
+    # 标题
+    title = os.path.basename(report.get("directory", ""))
+    tk.Label(win, text=f"番剧检测报告 — {title}", font=("Arial", 11, "bold"),
+             fg=accent, bg=bg).pack(pady=(10, 5))
+
+    # 基本信息
+    info_frame = tk.Frame(win, bg=bg)
+    info_frame.pack(fill="x", padx=20, pady=5)
+
+    oped_cels = report.get('oped_deducted_cels', 0)
+    oped_time = report.get('oped_deducted_time', 0)
+    oped_count = report.get('oped_intervals', 0)
+    info_items = [
+        ("分片数", f"{report.get('segments', 0)}"),
+        ("视频时长", f"{report.get('duration_min', 0):.1f} 分钟 ({report.get('duration_sec', 0):.0f} 秒)"),
+        ("处理帧数", f"{report.get('total_frames', 0)}"),
+        ("帧率", f"{report.get('video_fps', 0):.1f} fps"),
+        ("处理耗时", f"{report.get('elapsed_sec', 0):.1f} 秒 ({report.get('speedup', 0):.1f}x 实时)"),
+        ("缩放比例", f"{report.get('scale', 0)}"),
+        ("OP/ED段数", f"{oped_count}" if oped_count > 0 else "无"),
+        ("OP/ED扣除", f"{oped_cels} 张 / {oped_time:.1f}s" if oped_cels > 0 else "—"),
+    ]
+
+    for i, (label, value) in enumerate(info_items):
+        tk.Label(info_frame, text=f"{label}:", fg=accent, bg=bg,
+                 font=("Arial", 9, "bold")).grid(row=i, column=0, sticky="w", padx=5)
+        tk.Label(info_frame, text=value, fg=accent, bg=bg,
+                 font=("Arial", 9)).grid(row=i, column=1, sticky="w", padx=10)
+
+    # 核心数据
+    core_frame = tk.Frame(win, bg=bg)
+    core_frame.pack(fill="x", padx=20, pady=10)
+
+    total_cels = report.get("total_cels", 0)
+    net_cels = report.get("net_cels", total_cels)
+    avg_cels = report.get("avg_cels_per_sec", 0)
+    total_raw = report.get("total_raw", 0)
+    oped_cels = report.get("oped_deducted_cels", 0)
+
+    stat_items = [
+        (f"总张数\n(过滤后)", net_cels, 28),
+        (f"平均张/秒", f"{avg_cels:.1f}", 24),
+        (f"总张数\n(过滤前)", total_raw, 20),
+    ]
+    if oped_cels > 0:
+        stat_items.insert(1, (f"OP/ED扣除", f"-{oped_cels}", 20))
+
+    for text, value, size in stat_items:
+        frm = tk.Frame(core_frame, bg=btn_bg, bd=1, relief="solid")
+        frm.pack(side="left", expand=True, fill="both", padx=5)
+        tk.Label(frm, text=text, fg=accent, bg=btn_bg,
+                 font=("Arial", 8)).pack(pady=(5, 0))
+        tk.Label(frm, text=str(value), fg=accent, bg=btn_bg,
+                 font=("Arial", size, "bold")).pack(pady=(0, 5))
+
+    # 过滤明细
+    filter_frame = tk.LabelFrame(win, text="过滤明细", fg=accent, bg=bg,
+                                  font=("Arial", 9, "bold"))
+    filter_frame.pack(fill="both", expand=True, padx=20, pady=5)
+
+    tree = ttk.Treeview(filter_frame, columns=("type", "count"), show="headings", height=8)
+    tree.heading("type", text="过滤类型")
+    tree.heading("count", text="数量")
+    tree.column("type", width=200, anchor="w")
+    tree.column("count", width=100, anchor="e")
+
+    filtering = report.get("filtering", {})
+    items = [
+        ("全局平移对齐过滤", filtering.get("translation", 0)),
+        ("光流法过滤", filtering.get("optical_flow", 0)),
+        ("哈希重复帧过滤", filtering.get("hash", 0)),
+        ("静止过滤", filtering.get("still", 0)),
+        ("局部变化过滤", filtering.get("local", 0)),
+        ("缩放过滤", filtering.get("zoom", 0)),
+        ("其他", filtering.get("other", 0)),
+    ]
+    for name, val in items:
+        tree.insert("", tk.END, values=(name, val))
+
+    scroll = ttk.Scrollbar(filter_frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scroll.set)
+    tree.pack(side="left", fill="both", expand=True)
+    scroll.pack(side="right", fill="y")
+
+    # 按钮
+    btn_frame = tk.Frame(win, bg=bg)
+    btn_frame.pack(fill="x", padx=20, pady=10)
+
+    def save_report():
+        from tkinter import filedialog
+        import json as _json
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json", filetypes=[("JSON", "*.json")],
+            title="保存检测报告")
+        if path:
+            # 把 bytes 类型字段转字符串（Path 对象）
+            clean = {k: (str(v) if hasattr(v, 'parts') else v)
+                       for k, v in report.items()}
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(clean, f, indent=2, ensure_ascii=False)
+
+    tk.Button(btn_frame, text="保存报告 (JSON)", command=save_report,
+              bg=btn_bg, fg=accent).pack(side="left", padx=5)
+    tk.Button(btn_frame, text="关闭", command=win.destroy,
+              bg=btn_bg, fg=accent).pack(side="right", padx=5)
+
 
 if __name__ == "__main__":
     AnimeCelCounter()

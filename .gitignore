@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# 构建产物
+build/
+dist/
+
+# 自编译 OpenCV CUDA DLL（200MB+，不随仓库分发）
+opencv_dlls/
+
+# 运行时配置与测试产物
+cel_counter_settings.json
+cel_result.csv
+数据记录.csv
+*.prof
+
+# 系统文件
+Thumbs.db
+.DS_Store

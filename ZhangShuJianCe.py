@@ -15,13 +15,149 @@
 # Auto-merged file from multiple modules
 import sys, os, time, threading, json, copy, subprocess
 from collections import deque
-import cv2
 import numpy as np
 import tkinter as tk
 
 # --- Begin merged modules ---
 
-# ====== Module: config.py ======
+# ====== Module: opencv_env.py ======
+# opencv_env.py
+"""
+OpenCV / CUDA 运行库搜索路径引导（必须在 import cv2 之前执行）。
+
+为什么需要这一层：
+- 本项目使用自编译的 OpenCV 4.10 CUDA 版（opencv_world4100.dll），
+  它依赖 CUDA 11.8 运行库（cublas64_11 / cufft64_10 / npp* 等）。
+- Python 3.8+ 不再用 PATH 搜索扩展模块的依赖 DLL，必须显式
+  os.add_dll_directory()，否则会出现
+  "ImportError: DLL load failed while importing cv2: 找不到指定的模块"。
+- 打包成 exe 后 DLL 在 _internal/opencv_dlls/，路径与源码运行不同；
+  换机器后 CUDA toolkit 版本也可能不是 v11.8。
+
+本模块在 **import 时立即执行一次 setup()**，因此任何模块只要在
+`import cv2` 之前 `import opencv_env` 即可。setup() 的结果保存在
+_STATE 中，诊断脚本 / 设置界面可以读取实际加载到的目录。
+
+可通过环境变量 ZSJC_OPENCV_DLL_DIR 追加自定义 DLL 目录（优先级最高）。
+"""
+import glob
+import os
+import re
+import sys
+
+_STATE = {
+    "done": False,
+    "dirs": [],          # 已成功加入搜索路径的目录
+    "cuda_bin": None,    # 探测到的 CUDA bin 目录
+    "errors": [],        # [(path, reason)]
+}
+
+
+def _version_key(path):
+    """把 .../CUDA/v11.8 转成可比较的版本元组，取最高版本。"""
+    m = re.search(r"v(\d+)\.(\d+)", os.path.basename(path))
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def _candidate_dirs():
+    """按优先级返回候选 DLL 目录（保持顺序、去重）。"""
+    seen, out = set(), []
+
+    def add(path):
+        if not path:
+            return
+        path = os.path.abspath(path)
+        if path in seen or not os.path.isdir(path):
+            return
+        seen.add(path)
+        out.append(path)
+
+    # 0) 用户显式指定
+    for p in os.environ.get("ZSJC_OPENCV_DLL_DIR", "").split(os.pathsep):
+        add(p)
+
+    # 1) 打包运行
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", "")
+        add(os.path.join(meipass, "opencv_dlls"))
+        add(meipass)
+        add(os.path.join(os.path.dirname(sys.executable), "opencv_dlls"))
+
+    # 2) 源码运行：项目目录下自带的 DLL
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    add(os.path.join(project_dir, "opencv_dlls"))
+    add(project_dir)
+
+    # 3) 当前解释器的 site-packages（venv 里放的是自编译 cv2.pyd + opencv_world4100.dll）
+    add(os.path.join(sys.prefix, "Lib", "site-packages"))
+    if getattr(sys, "base_prefix", sys.prefix) != sys.prefix:
+        add(os.path.join(sys.base_prefix, "Lib", "site-packages"))
+
+    # 4) CUDA 运行库：优先环境变量，其次扫描已安装的最高版本
+    for var in ("CUDA_PATH", "CUDA_HOME"):
+        root = os.environ.get(var)
+        if root:
+            add(os.path.join(root, "bin"))
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    cuda_root = os.path.join(program_files, "NVIDIA GPU Computing Toolkit", "CUDA")
+    if os.path.isdir(cuda_root):
+        for d in sorted(glob.glob(os.path.join(cuda_root, "v*")), key=_version_key, reverse=True):
+            add(os.path.join(d, "bin"))
+
+    return out
+
+
+def setup(force=False):
+    """注册 DLL 搜索目录（幂等）。返回 _STATE。"""
+    if _STATE["done"] and not force:
+        return _STATE
+    _STATE["dirs"] = []
+    _STATE["errors"] = []
+    _STATE["cuda_bin"] = None
+
+    if not hasattr(os, "add_dll_directory"):
+        # 非 Windows 平台：保持原样即可
+        _STATE["done"] = True
+        return _STATE
+
+    for d in _candidate_dirs():
+        try:
+            # 必须保留返回的 handle，否则目录会在 GC 后被移除
+            _STATE.setdefault("_handles", []).append(os.add_dll_directory(d))
+            _STATE["dirs"].append(d)
+            base = os.path.basename(d).lower()
+            if base == "bin" and "cuda" in d.lower():
+                if _STATE["cuda_bin"] is None:
+                    _STATE["cuda_bin"] = d
+        except OSError as exc:
+            _STATE["errors"].append((d, str(exc)))
+
+    # 某些依赖（cuDNN / NVRTC 等）仍走 PATH，把 CUDA bin 前置一份
+    cuda_bin = _STATE["cuda_bin"]
+    if cuda_bin:
+        path = os.environ.get("PATH", "")
+        if cuda_bin.lower() not in path.lower():
+            os.environ["PATH"] = cuda_bin + os.pathsep + path
+
+    _STATE["done"] = True
+    return _STATE
+
+
+def describe():
+    """人类可读的引导结果，诊断用。"""
+    s = setup()
+    lines = ["OpenCV DLL 搜索目录:"]
+    lines += [f"  - {d}" for d in s["dirs"]]
+    if s["errors"]:
+        lines.append("失败目录:")
+        lines += [f"  - {d}: {err}" for d, err in s["errors"]]
+    lines.append(f"CUDA bin: {s['cuda_bin'] or '未找到'}")
+    return "\n".join(lines)
+
+
+# ---- 导入即执行：保证后续 import cv2 之前路径已就绪 ----
+setup()
+
 # ====== Module: config.py ======
 # config.py
 import copy
@@ -115,6 +251,7 @@ CONFIG = {
 
     "FULL_CORR_THRESHOLD": 0.998,       # 完整检测快速相似度阈值
     "FULL_STILL_RATIO": 0.002,           # 完整检测静止变化面积阈值
+    "GLOBAL_SHIFT_MIN_PIXELS": 0.3,     # 判定为全局平移的最小位移（像素）
 
     # ========== 局部运动判断 ==========
     "LOCAL_AREA_THRESH": 0.003,         # 局部运动判断：最大连通域面积占比下限
@@ -169,10 +306,15 @@ CONFIG = {
     "VIDEO_FILE_PATH": "",                # 上次打开的视频文件路径
     "VIDEO_PLAYBACK_SPEED": 1.0,          # 倍速播放（1.0=原速）
     "VIDEO_SEEK_ENABLED": True,           # 允许拖拽进度条
+    "VIDEO_HW_ACCEL": True,               # 视频硬件加速解码（D3D11/FFmpeg）
 
     # ========== GPU 加速 ==========
-    "GPU_ENABLED": False,                 # 是否启用 GPU 加速（需 OpenCV CUDA）
+    "GPU_ENABLED": False,                 # 是否启用 GPU 加速（需 OpenCV CUDA 版，见 README）
     "GPU_FORCE_FALLBACK": False,         # 即使检测到 GPU 也强制使用 CPU（用于测试）
+    "GPU_FLOW_MIN_PIXELS": 200000,       # 帧像素数低于此值不走 GPU 光流（实测小帧 GPU 反而慢）
+
+    # ========== 番剧导入 ==========
+    "KAZUMI_PARALLEL_WORKERS": 4,        # 番剧导入并行分段数（1=串行，>1=多线程分段处理）
     # ========== 颜色方案 ==========
     "COLORS": {
         "accent": "#E6397C",
@@ -224,7 +366,506 @@ def set_all_colors(colors_dict):
     if color_manager:
         color_manager._config = CONFIG["COLORS"]
         color_manager.apply_theme()
-# ====== Module: widgets.py ======
+# ====== Module: gpu_backend.py ======
+# gpu_backend.py
+"""
+GPU 后端（OpenCV CUDA）：可用性探测、能力自检与正确的原语封装。
+
+本模块只做三件事：
+1. 探测 CUDA 是否可用（设备数 > 0 不代表能用，必须真实跑一遍）；
+2. 能力自检：逐项执行差分、形态学、warpAffine、角点、光流，任何一项抛错
+   就把它标记为不可用，而不是让异常在热路径里被静默吞掉；
+3. 封装 GPU 原语，屏蔽 OpenCV Python 绑定的坑。
+
+两个必须知道的绑定行为（本机 OpenCV 4.10.0 实测）：
+- 多数 cv2.cuda 函数的 dst 输出参数**不会填充传入的 GpuMat**，而是返回新的
+  GpuMat。正确写法是 `_, mask = cv2.cuda.threshold(...)`、
+  `out = morph.apply(src)`。传 dst 只会得到空 Mat；继续对空 Mat 调
+  apply/countNonZero 会触发 CUDA illegal memory access，让整个进程崩溃。
+- SparsePyrLKOpticalFlow.calc 需要 4~6 个位置参数，返回
+  (nextPts, status, err)；prevPts 必须是 1xN、CV_32FC2 的 GpuMat。
+
+性能实测（RTX 3080，灰度图，Python 侧计时）：
+| 操作                                   | CPU     | GPU     |
+|----------------------------------------|---------|---------|
+| 差分+阈值+闭运算+countNonZero 324x576   | 0.044ms | 0.80ms  |
+| 完整运动分析（角点+光流+对齐）324x576   | 2.68ms  | 2.52ms  |
+| 完整运动分析（角点+光流+对齐）540x960   | 8.14ms  | 3.18ms  |
+
+结论：**小帧的简单差分不要上 GPU**（两次上传 + 一次 countNonZero 同步比
+CPU 计算还贵），只有光流这类重计算在大帧上才划算。因此主流程只把
+「角点检测 + 稀疏光流」放到 GPU，其余保持 CPU；阈值由
+CONFIG["GPU_FLOW_MIN_PIXELS"] 控制（默认 20 万像素，约 540x370）。
+"""
+import os
+import threading
+
+import cv2
+import numpy as np
+
+
+
+class GPUUnavailable(RuntimeError):
+    """CUDA 设备或 OpenCV CUDA 模块不可用。"""
+
+
+class GPUInfo:
+    """GPU 探测与自检结果。"""
+
+    def __init__(self):
+        self.available = False          # 设备数 > 0
+        self.device_count = 0
+        self.diff = False               # absdiff + threshold
+        self.morph = False              # 形态学闭运算
+        self.warp = False               # warpAffine
+        self.corners = False            # GoodFeaturesToTrack
+        self.flow = False               # SparsePyrLK
+        self.errors = {}                # 失败项 -> 错误信息
+
+    @property
+    def flow_ready(self):
+        """角点 + 光流 + 对齐可用，才允许走 GPU 运动分析。"""
+        return self.available and self.corners and self.flow and self.warp
+
+    @property
+    def diff_ready(self):
+        return self.available and self.diff and self.morph
+
+    def summary(self):
+        if not self.available:
+            return f"GPU 不可用（设备数={self.device_count}）"
+        if self.flow_ready:
+            return f"GPU 可用（{self.device_count} 设备，光流就绪）"
+        return f"GPU 部分可用（角点={self.corners} 光流={self.flow} 对齐={self.warp}）"
+
+    def __repr__(self):
+        return (f"<GPUInfo available={self.available} diff={self.diff} morph={self.morph} "
+                f"warp={self.warp} corners={self.corners} flow={self.flow} errors={self.errors}>")
+
+
+_probe_cache = None
+_probe_lock = threading.Lock()
+
+
+def _record(info, key, exc):
+    info.errors[key] = f"{type(exc).__name__}: {exc}"
+
+
+def _probe_impl():
+    info = GPUInfo()
+    try:
+        info.device_count = int(cv2.cuda.getCudaEnabledDeviceCount())
+    except Exception as exc:  # noqa: BLE001
+        _record(info, "device", exc)
+        return info
+    if info.device_count <= 0:
+        return info
+    info.available = True
+
+    # 自检图：32x48 太小容易没有角点，用 64x96
+    rng = np.random.default_rng(0)
+    base = (rng.random((72, 96)) * 255).astype(np.uint8)
+    moved = base.copy()
+    moved[16:48, 32:80] = 220
+
+    g1, g2 = cv2.cuda_GpuMat(), cv2.cuda_GpuMat()
+    try:
+        g1.upload(base)
+        g2.upload(moved)
+    except Exception as exc:  # noqa: BLE001
+        _record(info, "upload", exc)
+        return info
+
+    mask = None
+    # ---- absdiff + threshold ----
+    try:
+        diff = cv2.cuda.absdiff(g1, g2)
+        _, mask = cv2.cuda.threshold(diff, 20.0, 255.0, cv2.THRESH_BINARY)
+        info.diff = bool(mask is not None and not mask.empty()
+                         and cv2.cuda.countNonZero(mask) > 0)
+    except Exception as exc:  # noqa: BLE001
+        _record(info, "diff", exc)
+
+    # ---- 形态学闭运算 ----
+    try:
+        if mask is not None and not mask.empty():
+            f = cv2.cuda.createMorphologyFilter(
+                cv2.MORPH_CLOSE, cv2.CV_8UC1, np.ones((3, 3), np.uint8))
+            closed = f.apply(mask)
+            expect = cv2.morphologyEx(mask.download(), cv2.MORPH_CLOSE,
+                                      np.ones((3, 3), np.uint8))
+            info.morph = bool(not closed.empty()
+                              and np.array_equal(closed.download(), expect))
+    except Exception as exc:  # noqa: BLE001
+        _record(info, "morph", exc)
+
+    # ---- warpAffine ----
+    try:
+        M = np.float32([[1, 0, 1.5], [0, 1, -1.0]])
+        warped = cv2.cuda.warpAffine(g1, M, (96, 72), flags=cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_REPLICATE)
+        ref = cv2.warpAffine(base, M, (96, 72), flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_REPLICATE)
+        # 亚像素插值的定点舍入可能差 1 个灰阶，允许 ±1（像素级大幅偏离才算失败）
+        if warped is not None and warped.size() == (96, 72):
+            diff = np.abs(warped.download().astype(np.int16)
+                          - ref.astype(np.int16))
+            info.warp = bool(int(diff.max()) <= 1)
+    except Exception as exc:  # noqa: BLE001
+        _record(info, "warp", exc)
+
+    # ---- 角点 ----
+    pts = None
+    try:
+        det = cv2.cuda.createGoodFeaturesToTrackDetector(
+            cv2.CV_8UC1, maxCorners=120, qualityLevel=0.01, minDistance=5.0)
+        raw = det.detect(g2)
+        if raw is not None and not raw.empty():
+            pts = np.ascontiguousarray(
+                raw.download().reshape(-1, 2).astype(np.float32))
+            info.corners = len(pts) > 0
+    except Exception as exc:  # noqa: BLE001
+        _record(info, "corners", exc)
+
+    # ---- 光流 ----
+    if pts is not None and len(pts) > 0:
+        try:
+            lk = cv2.cuda.SparsePyrLKOpticalFlow.create(
+                winSize=(21, 21), maxLevel=3, iters=30)
+            gp1 = cv2.cuda_GpuMat()
+            gp1.upload(pts.reshape(1, -1, 2))
+            next_pts, status, _err = lk.calc(
+                g1, g2, gp1, cv2.cuda_GpuMat(), cv2.cuda_GpuMat(), cv2.cuda_GpuMat())
+            st = status.download() if status is not None else None
+            info.flow = bool(st is not None and st.size > 0 and int(st.sum()) > 0)
+        except Exception as exc:  # noqa: BLE001
+            _record(info, "flow", exc)
+
+    return info
+
+
+def probe(force=False):
+    """探测 GPU 能力（结果缓存；force=True 重新探测）。"""
+    global _probe_cache
+    with _probe_lock:
+        if _probe_cache is None or force:
+            _probe_cache = _probe_impl()
+        return _probe_cache
+
+
+def is_available():
+    return probe().available
+
+
+class GPUContext:
+    """
+    GPU 资源缓存与光流原语。
+
+    设计要点：
+    - 不持有自建 Stream：默认流下所有调用同步，避免 upload/download 与
+      计算跨流竞态（本项目曾因此出现"数据没上传完就去算"的问题）。
+    - 每帧上传的 CPU 图像引用会被保留，调用方可用 has_pair() 判断能否复用，
+      避免同一对帧被重复上传。
+    - 所有 GPU 调用只使用返回值，不依赖传入的 dst（见模块 docstring）。
+    """
+
+    def __init__(self, info=None):
+        self.info = info or probe()
+        if not self.info.available:
+            raise GPUUnavailable("OpenCV CUDA 设备不可用")
+        if not self.info.flow_ready:
+            raise GPUUnavailable(
+                "OpenCV CUDA 光流能力不完整："
+                f"角点={self.info.corners} 光流={self.info.flow} 对齐={self.info.warp} "
+                f"{self.info.errors}")
+
+        self._prev = cv2.cuda_GpuMat()
+        self._curr = cv2.cuda_GpuMat()
+        self._aligned = cv2.cuda_GpuMat()
+        self._aligned_mask = cv2.cuda_GpuMat()
+        self._prev_src = None
+        self._curr_src = None
+        self._shape = None
+
+        self._morph = None
+        self._lk = None
+        self._gftt = None
+        # 对齐差分链共用一个 stream：warp → absdiff → threshold → morph →
+        # countNonZero 全部异步提交，最后 waitForCompletion 一次，
+        # 避免每步都同步（默认流下每个调用都是一次同步点）。
+        self._stream = cv2.cuda.Stream()
+
+    # ---------------- 帧上传 ----------------
+
+    def upload_pair(self, prev, curr):
+        """上传一对相邻帧；尺寸变化时重建 GpuMat 由 upload 自动处理。"""
+        if prev is None or curr is None:
+            raise ValueError("upload_pair 需要两帧")
+        if prev.shape != curr.shape:
+            raise ValueError(f"两帧尺寸不一致: {prev.shape} vs {curr.shape}")
+        self._prev.upload(np.ascontiguousarray(prev))
+        self._curr.upload(np.ascontiguousarray(curr))
+        self._prev_src = prev
+        self._curr_src = curr
+        self._shape = curr.shape
+
+    # 兼容旧调用方（extract.py / kazumi_processor.py 曾用分开上传）
+    def upload_prev(self, prev):
+        self._prev.upload(np.ascontiguousarray(prev))
+        self._prev_src = prev
+        if self._shape is None and self._curr_src is not None:
+            self._shape = self._curr_src.shape
+
+    def upload_curr(self, curr):
+        self._curr.upload(np.ascontiguousarray(curr))
+        self._curr_src = curr
+        if self._shape is None and self._prev_src is not None:
+            self._shape = self._prev_src.shape
+
+    @property
+    def lk(self):
+        """兼容旧代码的 `ctx.lk` 写法。"""
+        return self._lk_obj()
+
+    def has_pair(self, prev, curr):
+        """判断显存里是否正好是这一对帧（同一对象、同尺寸）。"""
+        return (self._prev_src is prev and self._curr_src is curr
+                and self._shape == curr.shape)
+
+    @property
+    def shape(self):
+        return self._shape
+
+    def ensure_pair(self, prev, curr):
+        if not self.has_pair(prev, curr):
+            self.upload_pair(prev, curr)
+
+    # ---------------- 缓存对象 ----------------
+
+    def _morph_filter(self):
+        if self._morph is None:
+            self._morph = cv2.cuda.createMorphologyFilter(
+                cv2.MORPH_CLOSE, cv2.CV_8UC1, np.ones((3, 3), np.uint8))
+        return self._morph
+
+    def _lk_obj(self, lk_cuda=None):
+        if lk_cuda is not None:
+            return lk_cuda
+        if self._lk is None:
+            self._lk = cv2.cuda.SparsePyrLKOpticalFlow.create(
+                winSize=(21, 21), maxLevel=3, iters=30)
+        return self._lk
+
+    def _gftt_obj(self):
+        if self._gftt is None:
+            self._gftt = cv2.cuda.createGoodFeaturesToTrackDetector(
+                cv2.CV_8UC1,
+                maxCorners=int(CONFIG["FLOW_FEATURE_COUNT"]),
+                qualityLevel=float(CONFIG["FLOW_QUALITY_LEVEL"]),
+                minDistance=float(CONFIG["FLOW_MIN_DISTANCE"]))
+        return self._gftt
+
+    # ---------------- 原语 ----------------
+
+    def usable_for_flow(self, shape):
+        """按像素数门槛判断是否值得走 GPU 光流（小帧 GPU 反而更慢）。"""
+        if not self.info.flow_ready or shape is None:
+            return False
+        h, w = shape[:2]
+        return h * w >= int(CONFIG.get("GPU_FLOW_MIN_PIXELS", 200_000))
+
+    def corners(self, src="curr"):
+        """GPU 角点检测，返回 (N,2) float32 ndarray 或 None。"""
+        gmat = self._curr if src == "curr" else self._prev
+        raw = self._gftt_obj().detect(gmat)
+        if raw is None or raw.empty():
+            return None
+        pts = raw.download().reshape(-1, 2).astype(np.float32)
+        return np.ascontiguousarray(pts) if len(pts) else None
+
+    def track(self, p0, target="curr", lk_cuda=None):
+        """
+        prev -> target 的稀疏光流。
+        p0: (N,2) 或 (1,N,2) float32；返回 (p1(N,2) float32, status(N,) uint8)。
+        """
+        p0 = np.ascontiguousarray(p0, dtype=np.float32).reshape(1, -1, 2)
+        gp0 = cv2.cuda_GpuMat()
+        gp0.upload(p0)
+        next_img = self._curr if target == "curr" else self._aligned
+        if next_img is None or next_img.empty():
+            next_img = self._curr
+        next_pts, status, _err = self._lk_obj(lk_cuda).calc(
+            self._prev, next_img, gp0,
+            cv2.cuda_GpuMat(), cv2.cuda_GpuMat(), cv2.cuda_GpuMat())
+        p1 = next_pts.download().reshape(-1, 2).astype(np.float32)
+        st = status.download().reshape(-1)
+        return p1, st
+
+    def warp_translate(self, dx, dy, use_stream=False):
+        """对 curr 做平移对齐，结果存入 self._aligned（GPU 上完成）。"""
+        h, w = self._shape
+        M = np.float32([[1, 0, -dx], [0, 1, -dy]])
+        if use_stream:
+            self._aligned = cv2.cuda.warpAffine(
+                self._curr, M, (w, h), flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE, stream=self._stream)
+        else:
+            self._aligned = cv2.cuda.warpAffine(
+                self._curr, M, (w, h), flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REPLICATE)
+        return self._aligned
+
+    def aligned_cpu(self):
+        return None if self._aligned is None or self._aligned.empty() else self._aligned.download()
+
+    def aligned_mask_cpu(self):
+        return (None if self._aligned_mask is None or self._aligned_mask.empty()
+                else self._aligned_mask.download())
+
+    def aligned_change_ratio(self, threshold):
+        """
+        在 GPU 上完成「对齐帧 vs prev」的 absdiff → threshold → 闭运算 →
+        countNonZero，整条链在同一个 stream 上异步提交，只在最后同步一次，
+        返回 change_ratio（float）。
+
+        相比原实现（warp + download 对齐帧 + CPU 差分）少一次 0.3MB 下载
+        和三次 CPU 运算；纯平移帧（change_ratio 很小）可以据此直接返回，
+        连掩膜都不需要下载。
+        """
+        if (self._prev is None or self._prev.empty()
+                or self._aligned is None or self._aligned.empty()):
+            raise ValueError("aligned_change_ratio: 显存中的帧为空")
+        stream = self._stream
+        diff = cv2.cuda.absdiff(self._prev, self._aligned, stream=stream)
+        _, mask = cv2.cuda.threshold(
+            diff, float(threshold), 255.0, cv2.THRESH_BINARY, stream=stream)
+        closed = self._morph_filter().apply(mask, stream=stream)
+        cnt = cv2.cuda.countNonZero(closed, cv2.cuda_GpuMat(), stream)
+        stream.waitForCompletion()
+        self._aligned_mask = closed
+        h, w = self._shape
+        val = cnt.download() if cnt is not None and not cnt.empty() else None
+        if val is None:
+            raise RuntimeError("aligned_change_ratio: countNonZero 未返回结果")
+        return float(np.asarray(val).reshape(-1)[0]) / float(h * w)
+
+    def diff_mask(self, threshold, first="prev", second="curr"):
+        """
+        计算 first 与 second 的差分掩膜。
+        返回 (change_ratio, mask_gpu)；mask_gpu 留在显存，需要时再 download。
+        """
+        a = self._prev if first == "prev" else self._aligned
+        b = self._curr if second == "curr" else self._aligned
+        if a is None or a.empty() or b is None or b.empty():
+            raise ValueError("diff_mask: 显存中的帧为空")
+        diff = cv2.cuda.absdiff(a, b)
+        _, mask = cv2.cuda.threshold(diff, float(threshold), 255.0, cv2.THRESH_BINARY)
+        closed = self._morph_filter().apply(mask)
+        h, w = self._shape
+        ratio = cv2.cuda.countNonZero(closed) / float(h * w)
+        return ratio, closed
+
+    def aligned_diff(self, threshold):
+        """prev 与对齐帧的差分（对齐帧在显存中，避免二次上传）。"""
+        return self.diff_mask(threshold, first="prev", second="aligned")
+
+    def download(self, gpu_mat):
+        return gpu_mat.download()
+
+    def release(self):
+        # GpuMat 没有显式 release，置空并交给 GC / OpenCV 显存池
+        self._prev = cv2.cuda_GpuMat()
+        self._curr = cv2.cuda_GpuMat()
+        self._aligned = cv2.cuda_GpuMat()
+        self._prev_src = None
+        self._curr_src = None
+        self._shape = None
+        self._morph = None
+        self._lk = None
+        self._gftt = None
+
+
+# ---- 兼容旧接口 ----
+# 注意：不要在 import 时执行 probe()。多进程批量提取时每个子进程都
+# 初始化一次 CUDA 上下文会互相争抢，`--no-gpu` 也会白付这份开销
+# （实测 8 进程批量时每进程 ~1GB 内存、启动慢数秒）。
+def cuda_available():
+    return is_available()
+
+# ====== Module: async_pipeline.py ======
+# async_pipeline.py
+"""
+异步运动分析流水线（双缓冲）。
+
+完整检测由两段组成：
+1. GPU：角点 + 两次稀疏光流 + 对齐（约 1.5~2ms，cv2 CUDA 调用会释放 GIL）；
+2. CPU：对齐差分、连通域、masked_corr、统计（约 1.5~2ms，numpy/OpenCV CPU）。
+
+串行时这两段相加；本模块把第 1 段放到独立线程，主线程在「提交第 k 帧」
+之后立刻去结算「第 k-1 帧」的第 2 段。此时 GPU 线程正在算第 k 帧，
+于是 GPU 计算与 CPU 后处理重叠。
+
+约束：
+- 结果按提交顺序返回，主线程也按同样顺序结算，统计顺序不会乱；
+- 每条记录用帧自己的时间戳，滑动窗口/总张数不受滞后一帧影响；
+- 只有主线程做 GPU 之外的 CPU 工作，GPU 只由 worker 线程访问，
+  避免同一张卡上的默认流跨线程竞争。
+"""
+import queue
+import threading
+
+
+class MotionPipeline:
+    """
+    把运动分析函数放到独立线程，按提交顺序返回结果。
+
+    analyzer 由调用方传入（通常是 detection.unified_motion_analysis）。
+    这里不直接 import detection，是为了让 build.py 合并单文件时不会
+    因为内部 import 被剥离而丢掉依赖。
+    """
+
+    def __init__(self, analyzer, gpu_ctx, lk_cuda=None, use_optical_flow=True):
+        self._analyze = analyzer
+        self.gpu_ctx = gpu_ctx
+        self.lk_cuda = lk_cuda
+        self.use_optical_flow = use_optical_flow
+        self._in = queue.Queue(maxsize=4)
+        self._out = queue.Queue(maxsize=4)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            item = self._in.get()
+            if item is None:
+                break
+            token, prev, curr = item
+            try:
+                motion = self._analyze(
+                    prev, curr, self.use_optical_flow,
+                    use_gpu=self.gpu_ctx is not None,
+                    lk_cuda=self.lk_cuda, gpu_ctx=self.gpu_ctx)
+                self._out.put((token, motion, None))
+            except Exception as exc:  # noqa: BLE001
+                self._out.put((token, None, exc))
+
+    def submit(self, token, prev, curr):
+        self._in.put((token, prev, curr))
+
+    def collect(self, timeout=None):
+        """取最早提交的结果（阻塞直到可用）。"""
+        token, motion, err = self._out.get(timeout=timeout)
+        if err is not None:
+            raise err
+        return token, motion
+
+    def close(self):
+        try:
+            self._in.put_nowait(None)
+        except queue.Full:
+            pass
+        self._thread.join(timeout=2)
+
 # ====== Module: widgets.py ======
 # widgets.py
 import tkinter as tk
@@ -366,20 +1007,34 @@ class DraggablePanel:
                 y = parent_h - min_visible
         self.frame.place(x=x, y=y, width=max(self.min_width, w), height=max(self.min_height, h))
 # ====== Module: detection.py ======
-# ====== Module: detection.py ======
 # detection.py
 """
 动画作画张数检测模块。
 包含感知哈希、自适应阈值、全局平移估计、图层分离、缩放检测、
 局部运动判断、基础/完整检测等功能。
+
+GPU 加速的真实范围（2026-11 实测）：
+- 只把「角点检测 + 稀疏光流」放到 GPU：大帧上收益明显（540x960 差 2.5 倍）；
+- 差分/形态学不上 GPU：小帧上两次 upload + countNonZero 同步比 CPU 计算还慢，
+  主流程统一走 CPU（compute_diff_mask_gpu 仅保留给大分辨率离线任务和测试）；
+- 所有 GPU 能力由 gpu_backend 逐项自检，任何一项不可用就自动走 CPU，
+  不会出现"显示已启用 GPU，实际全是 CPU"的情况。
 """
 import cv2
 import numpy as np
-try:
-    import cv2.cuda
-    CUDA_AVAILABLE = True
-except ImportError:
-    CUDA_AVAILABLE = False
+
+
+__all__ = [
+    "GPUContext", "GPUUnavailable", "gpu_probe", "cuda_available",
+    "compute_hash", "compute_all_hashes", "adaptive_threshold",
+    "compute_diff_mask", "compute_diff_mask_gpu", "is_raw_change",
+    "fast_global_corr", "basic_is_new_cel", "has_local_motion",
+    "unified_motion_analysis", "full_is_new_cel", "full_decide",
+]
+
+# GPU 光流的最小有效特征点数（低于此值说明画面纹理太少，结果不可信）
+MIN_VALID_FLOW_POINTS = 20
+
 
 # ======================== 基本工具 ========================
 
@@ -420,287 +1075,402 @@ def compute_all_hashes(gray_img):
 
 def adaptive_threshold(frame):
     """根据帧的平均亮度计算自适应差分阈值"""
-    mean_val = np.mean(frame)
-    t = CONFIG["MIN_DIFF_THRESHOLD"] + (mean_val / 255.0) * (CONFIG["MAX_DIFF_THRESHOLD"] - CONFIG["MIN_DIFF_THRESHOLD"])
+    mean_val = float(cv2.mean(frame)[0])
+    t = CONFIG["MIN_DIFF_THRESHOLD"] + (mean_val / 255.0) * (
+        CONFIG["MAX_DIFF_THRESHOLD"] - CONFIG["MIN_DIFF_THRESHOLD"])
     return max(CONFIG["MIN_DIFF_THRESHOLD"], min(CONFIG["MAX_DIFF_THRESHOLD"], t))
 
 
 # ======================== 原始变化检测 ========================
 
-def is_raw_change(prev, curr):
-    """原始变化检测（仅基于差分面积比）"""
+def compute_diff_mask(prev, curr, threshold=None):
+    """
+    统一计算差分掩膜和变化率（一次 absdiff + 阈值 + 闭运算）。
+    返回 (diff, mask, ratio)。threshold 可传入以避免重复计算均值。
+    """
+    if threshold is None:
+        threshold = adaptive_threshold(curr)
     diff = cv2.absdiff(prev, curr)
-    thresh = adaptive_threshold(curr)
-    _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    ratio = np.count_nonzero(mask) / mask.size
-    return ratio >= CONFIG["MIN_CHANGE_RATIO"]
+    _, mask = cv2.threshold(diff, threshold, 255, cv2.THRESH_BINARY)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    ratio = cv2.countNonZero(mask) / mask.size
+    return diff, mask, ratio
+
+
+def compute_diff_mask_gpu(gpu_ctx, curr_mean=None):
+    """
+    GPU 版差分掩膜（保留给大分辨率离线任务/测试）。
+
+    注意：在 324x576 这类实时检测尺寸上，GPU 版本实测 0.80ms，
+    CPU 版本只要 0.044ms（两次上传 + countNonZero 同步的开销占主导），
+    所以主流程**不使用**本函数。返回值保持 (diff_gpu, mask_gpu, ratio) 三元组
+    以兼容既有调用方，其中 diff_gpu 恒为 None。
+    """
+    if curr_mean is None:
+        src = gpu_ctx._curr_src  # 上传时保留的 CPU 帧引用
+        curr_mean = float(np.mean(src)) if src is not None else 128.0
+    t = CONFIG["MIN_DIFF_THRESHOLD"] + (curr_mean / 255.0) * (
+        CONFIG["MAX_DIFF_THRESHOLD"] - CONFIG["MIN_DIFF_THRESHOLD"])
+    threshold = max(CONFIG["MIN_DIFF_THRESHOLD"],
+                    min(CONFIG["MAX_DIFF_THRESHOLD"], t))
+    ratio, mask_gpu = gpu_ctx.diff_mask(threshold)
+    return None, mask_gpu, ratio
+
+
+def is_raw_change(prev, curr, precomputed_ratio=None):
+    """原始变化检测（仅基于差分面积比），可接受预计算的 ratio 避免重复计算"""
+    if precomputed_ratio is None:
+        _, _, precomputed_ratio = compute_diff_mask(prev, curr)
+    return precomputed_ratio >= CONFIG["MIN_CHANGE_RATIO"]
 
 
 def fast_global_corr(img1, img2):
-    """快速计算两幅等尺寸灰度图的整体归一化相关系数（-1~1）"""
-    f1 = img1.astype(np.float64).ravel()
-    f2 = img2.astype(np.float64).ravel()
-    m1 = np.mean(f1)
-    m2 = np.mean(f2)
-    num = np.dot(f1 - m1, f2 - m2)
-    den = np.sqrt(np.dot(f1 - m1, f1 - m1) * np.dot(f2 - m2, f2 - m2))
+    """
+    两幅等尺寸灰度图的归一化互相关系数（-1~1），常量图返回 1.0。
+
+    曾经用 cv2.matchTemplate(TM_CCOEFF_NORMED) 实现，实测有两个问题：
+    1. 同样尺寸下慢 2.3~2.8 倍（576x324: 2.6ms vs 1.1ms）；
+    2. 常量图语义不稳定（576x324 全灰返回 0.0，而 numpy 版是 1.0），
+       会把纯色/静止画面误判成完全不同。
+    因此这里回到 numpy 实现，用 float32 控制内存带宽。
+    """
+    f1 = img1.astype(np.float32).ravel()
+    f2 = img2.astype(np.float32).ravel()
+    f1 -= f1.mean()
+    f2 -= f2.mean()
+    den = float(np.sqrt(np.dot(f1, f1) * np.dot(f2, f2)))
     if den < 1e-10:
         return 1.0
-    return num / den
+    return float(np.dot(f1, f2) / den)
+
+
+def masked_corr(img1, img2, mask):
+    """
+    只在 mask 非零区域计算归一化互相关系数，语义等价于
+    cv2.matchTemplate(img1, img2, TM_CCOEFF_NORMED, mask=mask)[0,0]，
+    但快一个数量级以上。
+
+    实测（768x405，mask 覆盖约 98% 像素）：
+      matchTemplate + mask : 23 ms
+      本函数               : 0.6 ms
+    这是完整检测里最大的单点开销，换成 numpy 布尔索引后整体提速约 70%。
+    """
+    sel = mask if mask.dtype == bool else (mask > 0)
+    n = int(np.count_nonzero(sel))
+    if n < 16:
+        return 1.0
+    a = img1[sel]
+    b = img2[sel]
+    fa = a.astype(np.float32)
+    fb = b.astype(np.float32)
+    fa -= fa.mean()
+    fb -= fb.mean()
+    den = float(np.sqrt(np.dot(fa, fa) * np.dot(fb, fb)))
+    if den < 1e-10:
+        return 1.0
+    return float(np.dot(fa, fb) / den)
 
 
 # ======================== 基础检测 ========================
 
-def basic_is_new_cel(prev, curr):
-    # 先计算差分，快速判断静止
-    diff = cv2.absdiff(prev, curr)
-    thresh = adaptive_threshold(curr)
-    _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    raw_ratio = np.count_nonzero(mask) / mask.size
+def basic_is_new_cel(prev, curr, precomputed_ratio=None):
+    """
+    基础检测，返回 (是否为新张, 移动类型描述)。
 
-    # 如果变化占比极小，直接判定为静止，无需计算相关系数
-    if raw_ratio < CONFIG["MIN_CHANGE_RATIO"]:
+    等价化简（原逻辑有 4 个分支但只有一条返回 False 的路径）：
+    - 变化率 < MIN_CHANGE_RATIO                       -> 静止
+    - 变化率 >= BASIC_MIN_RAW_RATIO_STILL             -> 新作画
+    - 变化率落在两者之间，才需要算相关系数判断是否极慢平移 -> 否则也是新作画
+    这样大部分帧跳过 fast_global_corr（1ms 级），与原判定结果完全一致。
+    """
+    if precomputed_ratio is None:
+        _, _, precomputed_ratio = compute_diff_mask(prev, curr)
+
+    if precomputed_ratio < CONFIG["MIN_CHANGE_RATIO"]:
         return False, "静止"
-
-    # 否则计算相关系数，继续原有逻辑
-    corr = fast_global_corr(prev, curr)
-    if corr > CONFIG["BASIC_CORR_THRESHOLD"]:
-        if raw_ratio < CONFIG["BASIC_MIN_RAW_RATIO_STILL"]:
-            return False, "极慢平移/静止"
-        if raw_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
-            return True, "新作画(基础)"
-        else:
-            return True, "新作画(基础)"
-    else:
-        if raw_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
-            return True, "新作画(基础)"
+    if precomputed_ratio >= CONFIG["BASIC_MIN_RAW_RATIO_STILL"]:
         return True, "新作画(基础)"
-
+    if fast_global_corr(prev, curr) > CONFIG["BASIC_CORR_THRESHOLD"]:
+        return False, "极慢平移/静止"
+    return True, "新作画(基础)"
 
 
 # ======================== 局部运动判断 ========================
 
 def has_local_motion(binary_mask):
     """判断变化掩膜是否为局部运动（如口型）"""
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask, connectivity=8)
+    num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        binary_mask, connectivity=8)
     if num_labels <= 1:
         return False
     areas = stats[1:, cv2.CC_STAT_AREA]
     if len(areas) == 0:
         return False
-    max_area = np.max(areas)
+    max_area = float(np.max(areas))
     total_pixels = binary_mask.size
     if max_area / total_pixels < CONFIG["LOCAL_AREA_THRESH"]:
         return False
-    ys, xs = np.where(binary_mask > 0)
-    if len(xs) < 20:
-        return False
-    x_range = np.max(xs) - np.min(xs)
-    y_range = np.max(ys) - np.min(ys)
+
+    # 所有前景点的联合包围盒（等价于原实现的全图 np.where，但直接取连通域统计）
+    lefts = stats[1:, cv2.CC_STAT_LEFT]
+    tops = stats[1:, cv2.CC_STAT_TOP]
+    rights = lefts + stats[1:, cv2.CC_STAT_WIDTH]
+    bottoms = tops + stats[1:, cv2.CC_STAT_HEIGHT]
+    x_range = int(rights.max()) - int(lefts.min())
+    y_range = int(bottoms.max()) - int(tops.min())
     bbox_area_ratio = (x_range * y_range) / total_pixels
     if bbox_area_ratio > CONFIG["LOCAL_BBOX_RATIO_MAX"]:
         return False
-    max_label = np.argmax(areas) + 1
-    max_mask = (labels == max_label).astype(np.uint8)
-    contours, _ = cv2.findContours(max_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours:
-        cnt = max(contours, key=cv2.contourArea)
-        x, y, w, h = cv2.boundingRect(cnt)
-        aspect_ratio = max(w, h) / (min(w, h) + 1)
-        if aspect_ratio > CONFIG["LOCAL_ASPECT_RATIO_MAX"]:
-            return False
+
+    max_idx = int(np.argmax(areas)) + 1
+    w = int(stats[max_idx, cv2.CC_STAT_WIDTH])
+    h = int(stats[max_idx, cv2.CC_STAT_HEIGHT])
+    aspect_ratio = max(w, h) / (min(w, h) + 1)
+    if aspect_ratio > CONFIG["LOCAL_ASPECT_RATIO_MAX"]:
+        return False
     return True
 
 
-# ======================== 统一运动分析（增加 lk_cuda 参数以复用 GPU 对象） ========================
+# ======================== 运动分析原语（CPU / GPU 共享判定） ========================
 
-def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False, lk_cuda=None):
-    """
-    统一运动分析，支持 GPU 加速（仅光流部分）。
-    lk_cuda 可选，若传入则复用已创建的 cv2.cuda.SparsePyrLKOpticalFlow 对象。
-    返回: (has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom)
-    """
-    max_corners = CONFIG["FLOW_FEATURE_COUNT"]
+def _track_cpu(prev, curr, p0):
+    """CPU 稀疏光流，p0 为 (N,2)；返回 (p1(N,2), status(N,))。"""
+    p1, status, _err = cv2.calcOpticalFlowPyrLK(
+        prev, curr, p0.reshape(-1, 1, 2).astype(np.float32), None)
+    if p1 is None or status is None:
+        return None, None
+    return p1.reshape(-1, 2).astype(np.float32), status.reshape(-1)
+
+
+def _detect_corners_cpu(prev):
     corners = cv2.goodFeaturesToTrack(
         prev,
-        maxCorners=max_corners,
-        qualityLevel=CONFIG["FLOW_QUALITY_LEVEL"],
-        minDistance=CONFIG["FLOW_MIN_DISTANCE"],
-        mask=None
+        maxCorners=int(CONFIG["FLOW_FEATURE_COUNT"]),
+        qualityLevel=float(CONFIG["FLOW_QUALITY_LEVEL"]),
+        minDistance=float(CONFIG["FLOW_MIN_DISTANCE"]),
+        mask=None,
     )
+    if corners is None:
+        return None
+    return np.ascontiguousarray(np.float32(corners).reshape(-1, 2))
 
-    has_shift = False
-    dx, dy = 0.0, 0.0
-    curr_aligned = curr
+
+def _estimate_global_shift(p0, p1, status):
+    """由首段光流估计全局平移；返回 (has_shift, dx, dy)。"""
+    if p1 is None or status is None:
+        return False, 0.0, 0.0
+    valid = status.reshape(-1) == 1
+    if int(valid.sum()) < MIN_VALID_FLOW_POINTS:
+        return False, 0.0, 0.0
+    vecs = p1[valid] - p0[valid]
+    dx = float(np.median(vecs[:, 0]))
+    dy = float(np.median(vecs[:, 1]))
+    if np.hypot(dx, dy) >= float(CONFIG.get("GLOBAL_SHIFT_MIN_PIXELS", 0.3)):
+        return True, dx, dy
+    return False, dx, dy
+
+
+def _detect_layer_and_zoom(p0, p1, status, shape):
+    """
+    对齐后的残余运动判断：同向大位移 -> 图层分离运镜；
+    径向一致且位移随半径增长 -> 缩放运镜。
+    返回 (is_layer_move, is_zoom)。
+    """
     is_layer_move = False
     is_zoom = False
+    if p1 is None or status is None:
+        return is_layer_move, is_zoom
+    valid = status.reshape(-1) == 1
+    if int(valid.sum()) < MIN_VALID_FLOW_POINTS:
+        return is_layer_move, is_zoom
 
-    if corners is None:
-        return has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom
+    vecs_res = p1[valid] - p0[valid]
+    pts = p0[valid]
+    norms_res = np.linalg.norm(vecs_res, axis=1)
 
-    p1 = np.float32(corners).reshape(-1, 2)
+    # ---- 图层分离 ----
+    moving_mask = norms_res > CONFIG["FLOW_LAYER_STATIC_THRESH"]
+    if int(np.sum(moving_mask)) >= CONFIG["LAYER_MIN_MOVING_POINTS"]:
+        moving_vecs = vecs_res[moving_mask]
+        mean_vec = np.mean(moving_vecs, axis=0)
+        if np.linalg.norm(mean_vec) >= CONFIG["LAYER_MEAN_VEC_MIN"]:
+            cos_sim = np.dot(moving_vecs, mean_vec) / (
+                np.linalg.norm(moving_vecs, axis=1) * np.linalg.norm(mean_vec) + 1e-8)
+            consistency = float(np.mean(cos_sim > CONFIG["LAYER_COS_SIM_THRESH"]))
+            if consistency > CONFIG["LAYER_DIRECTION_CONSISTENCY"]:
+                is_layer_move = True
 
-    gpu_available = False
-    if use_gpu:
+    # ---- 缩放 ----
+    h, w = shape[:2]
+    center = np.array([w / 2, h / 2])
+    radial_vecs = pts - center
+    radial_norms = np.linalg.norm(radial_vecs, axis=1)
+    far_mask = radial_norms > 5.0
+    if int(np.sum(far_mask)) >= 10:
+        final_mask = far_mask & (norms_res > 0.5)
+        if int(np.sum(final_mask)) >= 10:
+            radial_f = radial_vecs[final_mask]
+            radial_n_f = radial_norms[final_mask]
+            vec_n_f = norms_res[final_mask]
+
+            radial_unit = radial_f / (radial_n_f[:, np.newaxis] + 1e-8)
+            vec_unit = vecs_res[final_mask] / (vec_n_f[:, np.newaxis] + 1e-8)
+            cos_sim_rad = np.abs(np.sum(vec_unit * radial_unit, axis=1))
+            consistency_rad = float(np.mean(cos_sim_rad > 0.85))
+
+            if consistency_rad >= CONFIG.get("ZOOM_DIRECTION_CONSISTENCY", 0.7):
+                if len(vec_n_f) > 5:
+                    corr = np.corrcoef(radial_n_f, vec_n_f)[0, 1]
+                    if corr >= CONFIG.get("ZOOM_RADIAL_CORRELATION", 0.3):
+                        is_zoom = True
+
+    return is_layer_move, is_zoom
+
+
+def unified_motion_analysis(prev, curr, use_optical_flow=True, use_gpu=False,
+                            lk_cuda=None, gpu_ctx=None, frames_uploaded=False):
+    """
+    统一运动分析：一次角点 + 两次光流，检测全局平移、图层分离、缩放运镜。
+
+    GPU 只接管「角点检测 + 光流」；对齐（warpAffine）在 CPU 完成，
+    因为把对齐帧再下载回 CPU 的传输成本和 CPU 直接做几乎一样，
+    省掉这一步能让 GPU 路径更简单、结果与 CPU 路径完全一致。
+
+    frames_uploaded=True 表示调用方已经把这一对帧传进 gpu_ctx（避免二次上传）。
+    返回: (has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom)
+    """
+    shape = curr.shape
+    # 是否值得用 GPU（像素数门槛 + 能力自检）
+    gpu_ok = bool(use_gpu and gpu_ctx is not None
+                  and gpu_ctx.usable_for_flow(shape))
+    if gpu_ok and not frames_uploaded:
         try:
-            gpu_prev = cv2.cuda_GpuMat()
-            gpu_curr = cv2.cuda_GpuMat()
-            gpu_prev.upload(prev)
-            gpu_curr.upload(curr)
-            gpu_p1 = cv2.cuda_GpuMat()
-            gpu_p1.upload(p1)
-            # 复用传入的 lk_cuda，若未传入则创建（向后兼容）
-            lk = lk_cuda
-            if lk is None:
-                lk = cv2.cuda.SparsePyrLKOpticalFlow.create(winSize=(21, 21), maxLevel=3, iters=30)
-            gpu_p2, gpu_status, _ = lk.calc(gpu_prev, gpu_curr, gpu_p1)
-            p2_curr = gpu_p2.download()
-            status_curr = gpu_status.download()
-            gpu_available = True
-        except Exception:
-            gpu_available = False
+            gpu_ctx.upload_pair(prev, curr)
+        except Exception:  # noqa: BLE001
+            gpu_ok = False
 
-    if not gpu_available:
-        p2_curr, status_curr, _ = cv2.calcOpticalFlowPyrLK(prev, curr, p1, None)
+    # ---------- 角点（必须在 prev 上检测，才能用于 prev -> curr 的光流） ----------
+    p0 = None
+    if gpu_ok:
+        try:
+            p0 = gpu_ctx.corners("prev")
+        except Exception:  # noqa: BLE001
+            p0 = None
+            gpu_ok = False  # 角点失败说明 CUDA 链路有问题，后面直接走 CPU 更稳
+    if p0 is None or len(p0) < MIN_VALID_FLOW_POINTS:
+        p0 = _detect_corners_cpu(prev)
+        gpu_ok = False if p0 is None else gpu_ok
 
-    if p2_curr is not None and np.sum(status_curr) >= 20:
-        valid = status_curr.flatten() == 1
-        vecs_curr = p2_curr[valid] - p1[valid]
-        dx = np.median(vecs_curr[:, 0])
-        dy = np.median(vecs_curr[:, 1])
-        if np.sqrt(dx*dx + dy*dy) >= 0.3:
-            has_shift = True
-            h, w = curr.shape
-            M = np.float32([[1, 0, -dx], [0, 1, -dy]])
-            curr_aligned = cv2.warpAffine(curr, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    if p0 is None or len(p0) < 2:
+        return False, 0.0, 0.0, curr, False, False
+
+    # ---------- 第一次光流：prev -> curr ----------
+    p1 = status = None
+    if gpu_ok:
+        try:
+            p1, status = gpu_ctx.track(p0, target="curr", lk_cuda=lk_cuda)
+        except Exception:  # noqa: BLE001
+            p1 = status = None
+            gpu_ok = False
+    if p1 is None:
+        p1, status = _track_cpu(prev, curr, p0)
+
+    has_shift, dx, dy = _estimate_global_shift(p0, p1, status)
+
+    # ---------- 对齐 ----------
+    curr_aligned = curr
+    if has_shift:
+        h, w = shape[:2]
+        M = np.float32([[1, 0, -dx], [0, 1, -dy]])
+        curr_aligned = cv2.warpAffine(curr, M, (w, h),
+                                      borderMode=cv2.BORDER_REPLICATE)
 
     if not use_optical_flow:
         return has_shift, dx, dy, curr_aligned, False, False
 
-    # 第二次追踪：prev -> curr_aligned
-    if gpu_available:
+    # ---------- 第二次光流：prev -> curr_aligned ----------
+    p1a = stata = None
+    if gpu_ok and has_shift:
+        # 只有真正做了对齐才有意义；未平移时直接复用第一次结果
         try:
-            gpu_aligned = cv2.cuda_GpuMat()
-            gpu_aligned.upload(curr_aligned)
-            # 复用 lk 对象
-            gpu_p2_aligned, gpu_status_aligned, _ = lk.calc(gpu_prev, gpu_aligned, gpu_p1)
-            p2_aligned = gpu_p2_aligned.download()
-            status_aligned = gpu_status_aligned.download()
-        except:
-            p2_aligned, status_aligned, _ = cv2.calcOpticalFlowPyrLK(prev, curr_aligned, p1, None)
-    else:
-        p2_aligned, status_aligned, _ = cv2.calcOpticalFlowPyrLK(prev, curr_aligned, p1, None)
+            gpu_ctx.warp_translate(dx, dy)
+            p1a, stata = gpu_ctx.track(p0, target="aligned", lk_cuda=lk_cuda)
+        except Exception:  # noqa: BLE001
+            p1a = stata = None
+    if p1a is None:
+        p1a, stata = _track_cpu(prev, curr_aligned, p0)
 
-    if p2_aligned is not None and np.sum(status_aligned) >= 20:
-        valid = status_aligned.flatten() == 1
-        vecs_res = p2_aligned[valid] - p1[valid]
-        pts = p1[valid]
-        norms_res = np.linalg.norm(vecs_res, axis=1)
-
-        # 图层分离检测
-        moving_mask = norms_res > CONFIG["FLOW_LAYER_STATIC_THRESH"]
-        if np.sum(moving_mask) >= CONFIG["LAYER_MIN_MOVING_POINTS"]:
-            moving_vecs = vecs_res[moving_mask]
-            mean_vec = np.mean(moving_vecs, axis=0)
-            if np.linalg.norm(mean_vec) >= CONFIG["LAYER_MEAN_VEC_MIN"]:
-                cos_sim = np.dot(moving_vecs, mean_vec) / (
-                    np.linalg.norm(moving_vecs, axis=1) * np.linalg.norm(mean_vec) + 1e-8
-                )
-                consistency = np.mean(cos_sim > CONFIG["LAYER_COS_SIM_THRESH"])
-                if consistency > CONFIG["LAYER_DIRECTION_CONSISTENCY"]:
-                    is_layer_move = True
-
-        # 缩放检测
-        h, w = prev.shape
-        center = np.array([w/2, h/2])
-        radial_vecs = pts - center
-        radial_norms = np.linalg.norm(radial_vecs, axis=1)
-        far_mask = radial_norms > 5.0
-        if np.sum(far_mask) >= 10:
-            final_mask = far_mask & (norms_res > 0.5)
-            if np.sum(final_mask) >= 10:
-                pts_f = pts[final_mask]
-                vecs_f = vecs_res[final_mask]
-                radial_f = radial_vecs[final_mask]
-                radial_n_f = radial_norms[final_mask]
-                vec_n_f = norms_res[final_mask]
-
-                radial_unit = radial_f / (radial_n_f[:, np.newaxis] + 1e-8)
-                vec_unit = vecs_f / (vec_n_f[:, np.newaxis] + 1e-8)
-                cos_sim_rad = np.abs(np.sum(vec_unit * radial_unit, axis=1))
-                consistency_rad = np.mean(cos_sim_rad > 0.85)
-
-                if consistency_rad >= CONFIG.get("ZOOM_DIRECTION_CONSISTENCY", 0.7):
-                    if len(vec_n_f) > 5:
-                        corr = np.corrcoef(radial_n_f, vec_n_f)[0, 1]
-                        if corr >= CONFIG.get("ZOOM_RADIAL_CORRELATION", 0.3):
-                            is_zoom = True
-
+    is_layer_move, is_zoom = _detect_layer_and_zoom(p0, p1a, stata, shape)
     return has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom
 
 
-# ======================== 完整检测（增加 lk_cuda 参数） ========================
+# ======================== 完整检测 ========================
 
-def full_is_new_cel(prev, curr, use_optical_flow, use_gpu=False, lk_cuda=None):
+def full_decide(prev, curr, motion, precomputed_ratio, use_optical_flow=True):
     """
-    完整检测，返回 (是否为新张, 移动类型描述)
-    使用统一运动分析进行全局平移、图层分离、缩放检测，
-    并对齐后差分，结合局部运动、相似度等进行综合判断。
-    lk_cuda 可选，用于复用 GPU 光流对象。
+    完整检测的 CPU 判定部分：输入 unified_motion_analysis 的结果，
+    输出 (是否新张, 移动类型)。
+
+    单独拆出来是为了让「GPU 运动分析」和「CPU 判定」可以跑在不同线程里
+    （异步双缓冲），避免两边各写一套判定逻辑而慢慢分叉。
     """
-    corr = fast_global_corr(prev, curr)
+    has_shift, _dx, _dy, curr_aligned, is_layer_move, is_zoom = motion
+    if curr_aligned is None:
+        curr_aligned = curr
+    threshold = adaptive_threshold(curr)
+    _diff, mask, change_ratio = compute_diff_mask(prev, curr_aligned, threshold)
 
-    if corr > CONFIG["FULL_CORR_THRESHOLD"]:
-        raw_diff = cv2.absdiff(prev, curr)
-        raw_thresh = adaptive_threshold(curr)
-        _, raw_mask = cv2.threshold(raw_diff, raw_thresh, 255, cv2.THRESH_BINARY)
-        raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
-        if raw_ratio < CONFIG["FULL_STILL_RATIO"]:
-            return False, "极慢平移/静止"
-
-    diff_thresh = adaptive_threshold(curr)
-    raw_diff = cv2.absdiff(prev, curr)
-    _, raw_mask = cv2.threshold(raw_diff, diff_thresh, 255, cv2.THRESH_BINARY)
-    raw_ratio = np.count_nonzero(raw_mask) / raw_mask.size
-
-    has_shift, dx, dy, curr_aligned, is_layer_move, is_zoom = unified_motion_analysis(
-        prev, curr, use_optical_flow, use_gpu=use_gpu, lk_cuda=lk_cuda)
-
-    diff = cv2.absdiff(prev, curr_aligned)
-    _, mask = cv2.threshold(diff, diff_thresh, 255, cv2.THRESH_BINARY)
-    kernel = np.ones((3, 3), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    change_ratio = np.count_nonzero(mask) / mask.size
-
-    # 全局平移过滤
-    if raw_ratio >= CONFIG["MIN_CHANGE_RATIO"] and change_ratio < CONFIG["ALIGNED_CHANGE_THRESHOLD"] and has_shift:
+    # ---- 全局平移过滤 ----
+    if (precomputed_ratio >= CONFIG["MIN_CHANGE_RATIO"]
+            and has_shift
+            and change_ratio < CONFIG["ALIGNED_CHANGE_THRESHOLD"]):
         return False, "全局平移"
 
     if change_ratio >= CONFIG["ALIGNED_CHANGE_THRESHOLD"]:
         if has_local_motion(mask):
             return True, "新作画"
-
         if use_optical_flow and is_layer_move:
             return False, "图层分离运镜"
         if use_optical_flow and is_zoom:
             return False, "缩放运镜"
-
         if change_ratio >= CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
             return True, "新作画"
 
-    # 剩余微小变化的补充检查（已删除重复块，仅保留一处）
+    # ---- 剩余微小变化的补充检查：未变化区域的背景相似度 ----
     if change_ratio < CONFIG["SIGNIFICANT_CHANGE_RATIO"]:
         mask_inv = cv2.bitwise_not(mask)
-        score = cv2.matchTemplate(prev, curr_aligned, cv2.TM_CCOEFF_NORMED, mask=mask_inv)[0][0]
+        score = masked_corr(prev, curr_aligned, mask_inv)
         if score >= CONFIG["SSIM_THRESHOLD"]:
             return False, "局部变化(过滤)"
 
     return True, "新作画"
-# ====== Module: preview.py ======
+
+
+def is_full_still(prev, curr, precomputed_ratio):
+    """完整检测的前置快速判断：极慢平移/静止。"""
+    if precomputed_ratio >= CONFIG["FULL_STILL_RATIO"]:
+        return False
+    return fast_global_corr(prev, curr) > CONFIG["FULL_CORR_THRESHOLD"]
+
+
+def full_is_new_cel(prev, curr, use_optical_flow, use_gpu=False, lk_cuda=None,
+                    precomputed_ratio=None, gpu_ctx=None, frames_uploaded=False):
+    """
+    完整检测，返回 (是否为新张, 移动类型描述)
+    使用统一运动分析做全局平移、图层分离、缩放检测，
+    再对「对齐后差分」做局部运动 / 背景相似度判断。
+    """
+    if precomputed_ratio is None:
+        _, _, precomputed_ratio = compute_diff_mask(prev, curr)
+
+    if is_full_still(prev, curr, precomputed_ratio):
+        return False, "极慢平移/静止"
+
+    motion = unified_motion_analysis(
+        prev, curr, use_optical_flow, use_gpu=use_gpu, lk_cuda=lk_cuda,
+        gpu_ctx=gpu_ctx, frames_uploaded=frames_uploaded)
+    return full_decide(prev, curr, motion, precomputed_ratio, use_optical_flow)
+
 # ====== Module: preview.py ======
 # preview.py
 """
@@ -892,18 +1662,26 @@ class PreviewManager:
         label.configure(image=tk_img)
         label.image = tk_img
 # ====== Module: video_source.py ======
-# ====== Module: video_source.py ======
 # video_source.py
 """
 统一帧源抽象层：
 - 实时模式：封装 dxcam
 - 视频模式：封装 cv2.VideoCapture，可选 GPU 上传
 提供 next_frame() 接口返回 (timestamp, gray_small_frame, raw_bgr_frame, hash_256, oped_hash)
+
+关于「硬件加速」的说明（之前的实现名不符实）：
+OpenCV VideoCapture 的 CAP_PROP_HW_ACCELERATION 只是**请求**，是否真的
+走 NVDEC/D3D11 取决于构建和视频编码格式。这里在打开后用
+CAP_PROP_HW_ACCELERATION 读回实际值，记录到 decode_backend，
+不再无条件宣称"已硬解"。
 """
 
 import time
+import os
 import cv2
 import sys
+import shutil
+import tempfile
 import numpy as np
 import threading
 import queue
@@ -912,6 +1690,41 @@ try:
     DX_AVAILABLE = True
 except ImportError:
     DX_AVAILABLE = False
+
+
+# OpenCV 的硬解枚举值与字符串映射
+_HW_ACCEL_NAMES = {
+    0: "software",       # VIDEO_ACCELERATION_NONE
+    1: "d3d11",          # VIDEO_ACCELERATION_D3D11
+    2: "vaapi",          # VIDEO_ACCELERATION_VAAPI
+    3: "mfx",            # VIDEO_ACCELERATION_MFX
+}
+
+
+def normalize_video_path(path):
+    """
+    兼容 B 站缓存 m4s：文件开头有 9 字节 ASCII "000000000"，
+    剥掉后才是标准 fMP4，FFmpeg / OpenCV 才能打开。
+
+    返回可直接播放的路径（原文件或 TEMP 下的修复副本）。
+    修复副本按文件大小缓存，重复运行不会反复复制。
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(9)
+        if head != b"000000000":
+            return path
+        size = os.path.getsize(path)
+        dst = os.path.join(tempfile.gettempdir(),
+                           "zsjc_fix_" + os.path.basename(path) + ".mp4")
+        if (not os.path.isfile(dst)) or os.path.getsize(dst) != size - 9:
+            with open(path, "rb") as src, open(dst, "wb") as out:
+                src.seek(9)
+                shutil.copyfileobj(src, out, 1 << 20)
+        return dst
+    except OSError:
+        return path
+
 
 class FrameSource:
     def __init__(self, mode='realtime', video_path=None, scale_factor=0.5, region=None,
@@ -939,6 +1752,8 @@ class FrameSource:
         self._cached_frame = 0
         self._cached_duration = self.video_duration
         self.hash_enabled = hash_enabled
+        # 实际使用的解码后端（software / d3d11 / mfx ...），由打开后的读回值决定
+        self.decode_backend = "n/a"
 
         if mode == 'realtime':
             if not DX_AVAILABLE:
@@ -965,46 +1780,60 @@ class FrameSource:
             if video_path is None:
                 raise ValueError("视频模式必须提供 video_path")
 
-            # ========= 硬件加速尝试（优化版）=========
+            # B 站 m4s 需要先剥掉 9 字节前缀，否则 FFmpeg/OpenCV 都打不开
+            playback_path = normalize_video_path(video_path)
 
+            # ========= 硬件加速尝试（NVDEC → D3D11 → 软解）=========
             cap = None
 
-            if hw_accel and sys.platform == "win32":
-                try:
+            if hw_accel:
+                # 1) FFmpeg + NVDEC（NVIDIA GPU 硬解）
+                if sys.platform == "win32":
+                    try:
+                        # 设置 FFmpeg 环境变量启用 CUDA 硬解
+                        old_opts = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
+                        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "hwaccel;cuda|hwaccel_output_format;cuda"
+                        cap = cv2.VideoCapture(playback_path, cv2.CAP_FFMPEG)
+                        cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+                        if not cap.isOpened():
+                            cap.release()
+                            cap = None
+                        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = old_opts
+                    except Exception:
+                        pass
 
-                    cap = cv2.VideoCapture(video_path, cv2.CAP_MSMF)
+                # 2) MSMF + D3D11（Windows 原生硬解）
+                if cap is None and sys.platform == "win32":
+                    try:
+                        cap = cv2.VideoCapture(playback_path, cv2.CAP_MSMF)
+                        cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_D3D11)
+                        if not cap.isOpened():
+                            cap.release()
+                            cap = None
+                    except Exception:
+                        pass
 
-                    cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_D3D11)
+                # 3) FFmpeg 通用硬解
+                if cap is None:
+                    try:
+                        cap = cv2.VideoCapture(playback_path, cv2.CAP_FFMPEG)
+                        cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+                        if not cap.isOpened():
+                            cap.release()
+                            cap = None
+                    except Exception:
+                        pass
 
-                    if not cap.isOpened():
-                        cap.release()
-                        cap = None
-                except:
-                    pass
-            if cap is None and hw_accel:
-                try:
-                    cap = cv2.VideoCapture(video_path, cv2.CAP_FFMPEG)
-
-                    cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
-
-                    if not cap.isOpened():
-                        cap.release()
-
-                        cap = None
-
-                except:
-
-                    pass
-
+            # 回退：纯软件解码
             if cap is None:
-                # 回退：纯软件解码
-
-                cap = cv2.VideoCapture(video_path)
+                cap = cv2.VideoCapture(playback_path)
 
             self.cap = cap
             self._frame_counter = 0
             if not self.cap.isOpened():
                 raise IOError(f"无法打开视频文件: {video_path}")
+            # 读回实际的硬件加速状态：请求 != 生效
+            self.decode_backend = self._detect_decode_backend()
             self.video_fps = self.cap.get(cv2.CAP_PROP_FPS)
             self.video_total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.video_duration = self.video_total_frames / self.video_fps if self.video_fps > 0 else 0
@@ -1037,6 +1866,14 @@ class FrameSource:
             return True
         except Exception:
             return False
+
+    def _detect_decode_backend(self):
+        """读回 VideoCapture 实际采用的硬件加速方式（失败则视为软解）。"""
+        try:
+            raw = int(self.cap.get(cv2.CAP_PROP_HW_ACCELERATION))
+        except Exception:  # noqa: BLE001
+            return "software"
+        return _HW_ACCEL_NAMES.get(raw, f"hw:{raw}")
 
     def _process_frame(self, frame):
         """裁剪、缩放、灰度化，返回 (gray_small, bgr_raw)"""
@@ -1145,7 +1982,301 @@ class FrameSource:
         elif self.mode == 'video' and self.cap is not None:
             self.cap.release()
             self.cap = None
-# ====== Module: oped_detector.py ======
+
+
+# ======================== FFmpeg NVDEC 管道源（极速模式） ========================
+
+class FFmpegNvDecSource:
+    """
+    FFmpeg NVDEC 管道帧源。
+
+    真实情况（纠正旧注释）：只有**解码**走 NVDEC（-hwaccel cuda），
+    crop / scale / format=gray 由 FFmpeg 的 CPU 滤镜完成，Python 拿到的是
+    CPU 内存里的灰度裸帧。这样能吃到硬解的速度，又不用引入 scale_cuda
+    的兼容性问题。
+
+    启动后会等第一帧：拿不到就直接抛异常，让调用方回退到
+    FrameSource(OpenCV)，不会像旧实现那样静默产出 0 帧。
+    """
+
+    def __init__(self, video_path, scale_factor=0.5, target_h=None, target_w=None,
+                 hash_enabled=True):
+        import subprocess
+        import threading
+        import queue
+
+        self.video_path = normalize_video_path(video_path)
+        self.scale_factor = scale_factor
+        self.hash_enabled = hash_enabled
+        self._stop = False
+        self._lock = threading.Lock()
+
+        # 找到 FFmpeg 路径
+        self._ffmpeg_path = self._find_ffmpeg()
+        # ffprobe：同目录优先，找不到就用 PATH 里的
+        _ffdir = os.path.dirname(self._ffmpeg_path)
+        _ffname = os.path.basename(self._ffmpeg_path).replace("ffmpeg", "ffprobe")
+        _probe_candidate = os.path.join(_ffdir, _ffname) if _ffdir else ""
+        self._ffprobe_path = (_probe_candidate
+                              if _probe_candidate and os.path.isfile(_probe_candidate)
+                              else "ffprobe")
+
+        # 探测视频信息：宽高/帧率必须拿到，否则整帧字节数会算错，
+        # 后续 reshape 会跨帧错位（旧实现失败时默认 1920x1080，
+        # 导致 1280x720 的视频每帧错位约 0.4 帧，实测丢一半以上帧）。
+        try:
+            info = subprocess.check_output(
+                [self._ffprobe_path, "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height,avg_frame_rate",
+                 "-of", "csv=p=0", "-i", self.video_path],
+                text=True, stderr=subprocess.DEVNULL).strip().split(",")
+            self.orig_w = int(info[0])
+            self.orig_h = int(info[1])
+            fps_str = info[2] if len(info) > 2 else "0/0"
+            if "/" in fps_str:
+                num, den = fps_str.split("/")
+                self.video_fps = float(num) / float(den) if float(den) else 30.0
+            else:
+                self.video_fps = float(fps_str or 30)
+            if self.orig_w <= 0 or self.orig_h <= 0 or self.video_fps <= 0:
+                raise ValueError(f"无效的视频参数: {info}")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"FFprobe 无法确定视频尺寸/帧率（{video_path}）：{exc}"
+            ) from exc
+
+        # 时长/总帧数用于进度显示，拿不到不算致命
+        try:
+            dur = subprocess.check_output(
+                [self._ffprobe_path, "-v", "error",
+                 "-show_entries", "format=duration",
+                 "-of", "csv=p=0", "-i", self.video_path],
+                text=True, stderr=subprocess.DEVNULL).strip()
+            self.video_duration = float(dur) if dur else 0.0
+        except Exception:  # noqa: BLE001
+            self.video_duration = 0.0
+        self.video_total_frames = (int(self.video_duration * self.video_fps)
+                                   if self.video_duration > 0 else 0)
+
+        # 输出尺寸：与 FrameSource 完全一致的「裁剪比例 + 缩放」
+        # 这里刻意不用 FFmpeg 的 crop/scale/format=gray 滤镜出小帧：
+        # 实测滤镜链（先缩放后转灰度）与 FrameSource（先灰度后缩放）
+        # 的插值顺序/舍入不同，帧数据会差 1~2 个灰阶，在差分阈值上被放大，
+        # 四月是你的谎言那段实测张数从 816 掉到 616（-24%）。
+        # 因此只让 FFmpeg 负责解码，整帧 bgr24 交给 Python，按与
+        # FrameSource 完全相同的步骤（crop → cvtColor → resize）处理。
+        self.crop_w = int(self.orig_w * 0.8)   # 左右各 10%
+        self.crop_h = int(self.orig_h * 0.75)  # 上 10% + 下 15%
+        if target_w and target_h:
+            self.out_w, self.out_h = int(target_w), int(target_h)
+        else:
+            self.out_w = int(round(self.crop_w * scale_factor))
+            self.out_h = int(round(self.crop_h * scale_factor))
+        self.frame_shape = (self.out_h, self.out_w)
+        self.frame_bytes = self.orig_w * self.orig_h * 3
+
+        # FFmpeg 管道命令：NVDEC 硬解 → 整帧 bgr24
+        self._cmd = [
+            "ffmpeg",
+            "-hwaccel", "cuda",
+            "-i", self.video_path,
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "-vsync", "0",
+            "-an",
+            "-threads", "1",
+            "pipe:1"
+        ]
+
+        self._proc = None
+        # 队列只存 small（不需要原始 BGR），120 帧足够缓冲，避免几百 MB 堆积
+        self.frame_queue = queue.Queue(maxsize=120)
+        self._frame_counter = 0
+        self._cached_time = 0.0
+        self._cached_frame = 0
+        self._pause = False
+        self._first_frame = None
+
+        self._start_process()
+        # 启动自检：必须真的拿到第一帧，否则让调用方回退 OpenCV 帧源
+        try:
+            first = self.frame_queue.get(timeout=5.0)
+        except queue.Empty:
+            self.close()
+            raise RuntimeError("FFmpeg NVDEC 管道启动超时（5s 内未产出帧）")
+        if first is None:
+            self.close()
+            raise RuntimeError("FFmpeg NVDEC 管道未产出帧（可能不支持该编码/硬件）")
+        self._first_frame = first
+
+    @classmethod
+    def _find_ffmpeg(cls):
+        """自动搜索 FFmpeg 可执行文件（含 winget 安装路径），结果缓存。"""
+        if cls._ffmpeg_cache:
+            return cls._ffmpeg_cache
+        candidates = ["ffmpeg", "ffmpeg.exe"]
+        # winget 安装路径（Gyan.FFmpeg.Shared）
+        try:
+            import pathlib
+            base = pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft/WinGet/Packages"
+            for d in base.glob("Gyan.FFmpeg.Shared_*"):
+                for pattern in ["ffmpeg-*/bin/ffmpeg.exe", "*/bin/ffmpeg.exe"]:
+                    for exe in d.glob(pattern):
+                        candidates.insert(0, str(exe))
+        except Exception:  # noqa: BLE001
+            pass
+        # 标准路径
+        for p in [r"C:\Program Files\FFmpeg\bin\ffmpeg.exe",
+                  r"C:\Program Files (x86)\FFmpeg\bin\ffmpeg.exe"]:
+            if os.path.isfile(p):
+                candidates.insert(1, p)
+        import subprocess as _sp
+        for c in candidates:
+            try:
+                _sp.check_call([c, "-version"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                cls._ffmpeg_cache = c
+                return c
+            except Exception:  # noqa: BLE001
+                continue
+        cls._ffmpeg_cache = "ffmpeg"  # 兜底，让后续报错更明显
+        return cls._ffmpeg_cache
+
+    _ffmpeg_cache = None
+
+    def _start_process(self):
+        import subprocess
+        self._cmd[0] = self._ffmpeg_path
+        self._proc = subprocess.Popen(
+            self._cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL
+        )
+        self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader_thread.start()
+
+    def _read_loop(self):
+        """持续从 FFmpeg stdout 读取裸帧，包装为 numpy 放入队列。
+
+        注意：readinto() 不保证一次读满整帧，管道边界处经常返回半帧。
+        旧实现把 n < frame_size 直接当 EOF，导致大量丢帧
+        （实测 58 秒视频只读到 776/1747 帧，219 秒视频只读到 623/6574 帧）。
+        这里必须循环读满。
+        """
+        frame_size = self.frame_bytes
+        buf = bytearray(frame_size)
+        view = memoryview(buf)
+        while not self._stop:
+            # 暂停：不读 stdout，FFmpeg 会在管道写满后自然阻塞，不浪费 CPU
+            while self._pause and not self._stop:
+                time.sleep(0.02)
+            got = 0
+            while got < frame_size:
+                n = self._proc.stdout.readinto(view[got:])
+                if not n:
+                    break
+                got += n
+            if got < frame_size:
+                break  # 视频结束或解码出错
+            ts = self._frame_counter / self.video_fps if self.video_fps > 0 else 0.0
+            self._frame_counter += 1
+            # 整帧 BGR → 与 FrameSource._process_frame 完全相同的裁剪/灰度/缩放
+            full = np.frombuffer(buf, dtype=np.uint8).reshape(
+                self.orig_h, self.orig_w, 3)
+            top = int(self.orig_h * 0.10)
+            bottom = int(self.orig_h * 0.15)
+            left = int(self.orig_w * 0.10)
+            right = int(self.orig_w * 0.10)
+            frame = full[top:self.orig_h - bottom, left:self.orig_w - right]
+            # bgr_raw 只给预览用，主流程/提取器都不用；管道源不复制整帧省内存
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            small = cv2.resize(gray, (self.out_w, self.out_h),
+                               interpolation=cv2.INTER_LINEAR)
+            # 计算哈希（可配置关闭）
+            hash_256 = oped_hash = None
+            if self.hash_enabled:
+                try:
+                    hash_256, oped_hash = compute_all_hashes(small)
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                self.frame_queue.put((ts, small, None, hash_256, oped_hash), timeout=0.5)
+            except Exception:  # noqa: BLE001
+                break
+            self._cached_time = ts
+            self._cached_frame = self._frame_counter
+        # 结束前自检：读到的帧数明显少于按时长估算的帧数，说明硬解不完整
+        expected = self.video_total_frames
+        if expected and not self._stop and self._frame_counter < expected * 0.9:
+            print(f"[NVDEC] 警告：只读到 {self._frame_counter}/{expected} 帧，"
+                  f"硬解可能不完整（{self.video_path}）", file=sys.stderr)
+        # EOF
+        try:
+            self.frame_queue.put(None, timeout=1)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def next_frame(self):
+        if self._first_frame is not None:
+            item, self._first_frame = self._first_frame, None
+            return item
+        try:
+            return self.frame_queue.get_nowait()
+        except queue.Empty:
+            return None, None, None, None, None
+
+    def seek(self, pos_sec):
+        """Seek 需要重建 FFmpeg 进程（管道模式无法随机访问）"""
+        self._stop = True
+        try:
+            self._proc.kill()
+            self._proc.wait(timeout=2)
+        except Exception:  # noqa: BLE001
+            pass
+        while True:
+            try:
+                self.frame_queue.get_nowait()
+            except queue.Empty:
+                break
+        self._frame_counter = int(pos_sec * self.video_fps)
+        self._first_frame = None
+        self._stop = False
+        # 重建进程：-ss 必须作为输入选项放在 -i 之前，才是快速 seek
+        cmd = self._cmd.copy()
+        idx = cmd.index("-i")
+        cmd[idx:idx] = ["-ss", str(pos_sec)]
+        import subprocess
+        self._proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL
+        )
+        self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader_thread.start()
+
+    def pause(self):
+        self._pause = True
+
+    def resume(self):
+        self._pause = False
+
+    def get_progress(self):
+        return (self._cached_time, self.video_duration,
+                self._cached_frame, self.video_total_frames)
+
+    def close(self):
+        self._stop = True
+        try:
+            self._proc.kill()
+            self._proc.wait(timeout=2)
+        except Exception:
+            pass
+        while True:
+            try:
+                self.frame_queue.get_nowait()
+            except Exception:
+                break
 # ====== Module: oped_detector.py ======
 # oped_detector.py
 """
@@ -1247,19 +2378,17 @@ class OPEDDetector:
 
         t_now, h_now = self.hash_seq[-1]
 
-        # 自排除比较：仅比较排除窗口之前的历史，并提前终止循环
+        # 自排除比较：仅比较排除窗口之前的历史
+        # 限制搜索范围：最多回溯 7200 个样本（≈2小时 @ 1s间隔）
+        search_limit = min(len(self.hash_seq), 7200)
         matched = False
-        for t_hist, h_hist in reversed(self.hash_seq):
+        for i in range(len(self.hash_seq) - 1, max(len(self.hash_seq) - search_limit - 1, -1), -1):
+            t_hist, h_hist = self.hash_seq[i]
             if t_hist >= t_now - self_exclude:
                 continue  # 还在排除窗口内，跳过
-            if bin(h_now ^ h_hist).count('1') <= enter_dist:
+            if (h_now ^ h_hist).bit_count() <= enter_dist:
                 matched = True
                 break
-            # 因为时间是递增的，一旦遇到早于排除窗口的时间，后续不需要再判断排除窗口
-            if t_hist < t_now - self_exclude:
-                # 如果这一条没匹配上，后续的更早记录也可能匹配，所以不能 break
-                # 但我们可以根据匹配逻辑继续，不优化退出
-                pass
 
         if matched:
             self.match_streak += 1
@@ -1319,7 +2448,7 @@ class OPEDDetector:
                     continue
                 similar = 0
                 for i in range(min_len):
-                    if bin(query_hashes[i] ^ tpl_hashes[i]).count('1') <= max_dist:
+                    if (query_hashes[i] ^ tpl_hashes[i]).bit_count() <= max_dist:
                         similar += 1
                 ratio = similar / min_len
                 if ratio > best_ratio:
@@ -1390,7 +2519,6 @@ class OPEDDetector:
 
     def get_deducted_time(self):
         return self.deducted_time
-# ====== Module: record_manager.py ======
 # ====== Module: record_manager.py ======
 # record_manager.py
 """
@@ -1678,7 +2806,6 @@ class RecordManager:
         win.transient(parent_win)
         win.grab_set()
 # ====== Module: ui.py ======
-# ====== Module: ui.py ======
 # ui.py
 import copy, json, os
 import tkinter as tk
@@ -1693,7 +2820,7 @@ def build_main_ui(master, counter):
     ui = {}
     TRANSPARENT = "#000000"
     main_frame = tk.Frame(master, bg=TRANSPARENT)
-    main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+    main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=3)
 
     info_frame = tk.Frame(main_frame, bg=TRANSPARENT, width=130, height=200)
     info_frame.grid(row=0, column=0, sticky="nw", padx=(0, 10), pady=(10, 0))
@@ -1702,19 +2829,19 @@ def build_main_ui(master, counter):
     accent = color_manager.get_color('accent')
     lb_rt = tk.Label(info_frame, text="实时张数：0.0 ", fg=accent, bg=TRANSPARENT,
                      font=("Arial", 10, "bold"), anchor="w")
-    lb_rt.pack(anchor="w", pady=3)
+    lb_rt.pack(anchor="w", pady=(3, 0))
     lb_total_time = tk.Label(info_frame, text="运行时长：0.0 s", fg=accent, bg=TRANSPARENT,
                              font=("Arial", 10, "bold"), anchor="w")
-    lb_total_time.pack(anchor="w", pady=3)
+    lb_total_time.pack(anchor="w", pady=0)
     lb_total_cels = tk.Label(info_frame, text="总张数：0", fg=accent, bg=TRANSPARENT,
                              font=("Arial", 10, "bold"), anchor="w")
-    lb_total_cels.pack(anchor="w", pady=3)
+    lb_total_cels.pack(anchor="w", pady=0)
     lb_avg = tk.Label(info_frame, text="总平均：0.0", fg=accent, bg=TRANSPARENT,
                       font=("Arial", 10, "bold"), anchor="w")
-    lb_avg.pack(anchor="w", pady=3)
+    lb_avg.pack(anchor="w", pady=0)
     lb_st = tk.Label(info_frame, text="静止/纯运镜", fg=accent, bg=TRANSPARENT,
                      font=("Arial", 10, "bold"), anchor="w")
-    lb_st.pack(anchor="w", pady=5)
+    lb_st.pack(anchor="w", pady=(0, 3))
 
     wave_frame = tk.Frame(main_frame, bg=TRANSPARENT, width=300, height=80)
     wave_frame.grid(row=0, column=1, sticky="n", padx=(0, 10), pady=(10, 0))
@@ -1729,7 +2856,7 @@ def build_main_ui(master, counter):
     canvas2.pack(fill=tk.BOTH, expand=True)
 
     btn_canvas = tk.Canvas(main_frame, bg=TRANSPARENT, highlightthickness=0, bd=0,
-                           width=120, height=150)
+                           width=120, height=180)
     btn_canvas.grid(row=0, column=3, sticky="n", padx=(0, 10), pady=(10, 0))
 
     ui['lb_rt'] = lb_rt
@@ -1993,7 +3120,7 @@ def create_settings_window(parent, counter):
     video_group.pack(fill="x", padx=5, pady=5)
 
     gpu_var = tk.BooleanVar(value=CONFIG.get("GPU_ENABLED", False))
-    tk.Checkbutton(video_group, text="启用 GPU 加速 (需 OpenCV CUDA)", variable=gpu_var,
+    tk.Checkbutton(video_group, text="启用 GPU 加速 (需 OpenCV CUDA，自检通过才生效)", variable=gpu_var,
                    fg=accent, bg=bg, selectcolor=btn_bg).pack(anchor="w", padx=5, pady=2)
 
     speed_label = tk.Label(video_group, text="默认播放速度:", fg=accent, bg=bg)
@@ -2220,18 +3347,17 @@ def create_crop_window(counter):
                        text="拖动矩形移动，拖拽白点调整大小，点击外部或ESC关闭",
                        fill="white", font=("Arial", 12))
 # ====== Module: main.py ======
-# ====== Module: main.py ======
 # ==============================================================================
 # 项目名称：动漫张数检测系统
 # 功能说明：dxcam捕获、多重过滤非新作画帧、实时预览、UI交互一体化工具
 # 模块组成：config.py / widgets.py / detection.py / preview.py / ui.py / video_source.py / oped_detector.py / record_manager.py / main.py
 # ==============================================================================
-import cv2
-print(cv2.cuda.getCudaEnabledDeviceCount())  # 输出 >0 表示支持 CUDA
+import sys, os
 
+import cv2
 cv2.setNumThreads(6)          # 调用cpu线程数
-cv2.ocl.setUseOpenCL(False)   # 若 GPU 光流已手动管理，关闭 OpenCL 避免冲突
-import sys, os, time, threading, json, copy, subprocess
+cv2.ocl.setUseOpenCL(False)   # GPU 光流由 OpenCV CUDA 管理，关闭 OpenCL 避免抢占
+import time, threading, json, copy, subprocess
 from collections import deque
 import csv
 import cv2
@@ -2254,9 +3380,14 @@ class AnimeCelCounter:
     """动画作画张数计数器主类，负责屏幕捕获、变化检测、统计与UI"""
 
     def __init__(self):
-        import cProfile
-        self.profiler = cProfile.Profile()
-        self.profiler.enable()
+        # 性能分析：仅在设置环境变量 CEL_PROFILE=1 时启用（省 5-15% CPU）
+        self._profile_enabled = os.environ.get("CEL_PROFILE", "") == "1"
+        if self._profile_enabled:
+            import cProfile
+            self.profiler = cProfile.Profile()
+            self.profiler.enable()
+        else:
+            self.profiler = None
 
         # ---------- 基础路径与拖拽数据 ----------
         if getattr(sys, 'frozen', False):
@@ -2270,8 +3401,6 @@ class AnimeCelCounter:
         self._stop_event = threading.Event()
         self._run_event = threading.Event()
         self._run_event.set()
-        self.time_lock = threading.Lock()
-        self.skip_until_elapsed = 0.0
 
         # 时钟锁，保护 _current_clock 读写
         self.clock_lock = threading.Lock()
@@ -2370,22 +3499,36 @@ class AnimeCelCounter:
         # ========== 视频模式与 GPU 初始化 ==========
         self.video_mode = CONFIG.get("VIDEO_MODE", False)
         self.video_file_path = CONFIG.get("VIDEO_FILE_PATH", "")
-        self.use_gpu = CONFIG.get("GPU_ENABLED", False) and self._check_gpu_usable()
+        # GPU：先逐项自检（GPUInfo），只有光流链路真的可用才启用。
+        # 这样不会再出现"设置里显示 GPU 已启用、实际全部在 CPU 跑"的情况。
+        self.gpu_info = gpu_probe()
+        gpu_allowed = not CONFIG.get("GPU_FORCE_FALLBACK", False)
+        self.use_gpu = bool(gpu_allowed and self.gpu_info.flow_ready)
+        CONFIG["GPU_ENABLED"] = self.use_gpu
+
         self.frame_source = None
         self.video_controls = None
-        self.video_clock = 0.0
         self.video_is_playing = True
         self.video_playback_speed = CONFIG.get("VIDEO_PLAYBACK_SPEED", 1.0)
         self._realtime_elapsed = 0.0
         self._last_capture_time = None
+        # 视频倍速节流基准 (墙钟, 视频时间戳) 与丢帧计数
+        self._video_pace_origin = None
+        self._video_dropped_frames = 0
 
-        # 创建 GPU 光流对象（如果启用且可用）
+        # ─── GPU 上下文：缓存 GpuMat / 光流 / 角点检测器 ───
+        self.gpu_ctx = None
         self.lk_cuda = None
         if self.use_gpu:
             try:
-                self.lk_cuda = cv2.cuda.SparsePyrLKOpticalFlow.create(winSize=(21,21), maxLevel=3, iters=30)
-            except:
+                self.gpu_ctx = GPUContext(self.gpu_info)
+                self.lk_cuda = self.gpu_ctx.lk
+            except Exception as e:  # noqa: BLE001
                 self.use_gpu = False
+                self.gpu_ctx = None
+                self.lk_cuda = None
+                print(f"[GPU] 初始化失败: {e}，回退 CPU")
+        print(f"[GPU] {self.gpu_info.summary()}；运动分析={'GPU 光流' if self.use_gpu else 'CPU'}")
 
         # 如果配置为视频模式，尝试初始化帧源
         if self.video_mode and self.video_file_path:
@@ -2471,12 +3614,8 @@ class AnimeCelCounter:
         return get_settings_path()
 
     def _check_gpu_usable(self):
-        try:
-            dummy = np.zeros((100, 100), dtype=np.uint8)
-            unified_motion_analysis(dummy, dummy, use_optical_flow=True, use_gpu=True)
-            return True
-        except:
-            return False
+        """GPU 能力自检（真实跑一遍角点+光流+对齐，而不是只创建对象）。"""
+        return gpu_probe()
 
     def load_settings(self):
         try:
@@ -2549,11 +3688,36 @@ class AnimeCelCounter:
         buttons_info = [
             ("关闭", self._on_close),
             ("设置", self.open_settings),
+            ("导入番剧", self._import_anime_cache),
             ("导入视频", self._import_video),
             (pause_text, self.pause),
             ("重置统计", self.reset_stats)
         ]
         accent = color_manager.get_color('accent')
+
+        self._btn_rects = []
+        self._btn_texts = []
+        self._submenu_hide_id = None
+
+        def _show_sub():
+            if self._submenu_hide_id:
+                canvas.after_cancel(self._submenu_hide_id)
+                self._submenu_hide_id = None
+            for i in range(2, len(self._btn_rects)):
+                canvas.itemconfigure(self._btn_rects[i], state='normal')
+                canvas.itemconfigure(self._btn_texts[i], state='normal')
+
+        def _hide_sub():
+            if self._submenu_hide_id:
+                canvas.after_cancel(self._submenu_hide_id)
+            self._submenu_hide_id = canvas.after(500, _do_hide)
+
+        def _do_hide():
+            self._submenu_hide_id = None
+            for i in range(2, len(self._btn_rects)):
+                canvas.itemconfigure(self._btn_rects[i], state='hidden')
+                canvas.itemconfigure(self._btn_texts[i], state='hidden')
+
         for i, (text, cmd) in enumerate(buttons_info):
             y0 = 5 + i * (btn_h + gap)
             y1 = y0 + btn_h
@@ -2564,6 +3728,13 @@ class AnimeCelCounter:
                                          text=text, fill=accent,
                                          font=("Arial", 9, "bold"),
                                          activefill="#FFD700")
+            self._btn_rects.append(rect_id)
+            self._btn_texts.append(text_id)
+
+            # 隐藏"设置"下方的按钮（i>=2）
+            if i >= 2:
+                canvas.itemconfigure(rect_id, state='hidden')
+                canvas.itemconfigure(text_id, state='hidden')
 
             def safe_cmd(cmd):
                 if not self._drag_data['dragging']:
@@ -2571,14 +3742,123 @@ class AnimeCelCounter:
 
             canvas.tag_bind(rect_id, "<ButtonRelease-1>", lambda e, c=cmd: safe_cmd(c))
             canvas.tag_bind(text_id, "<ButtonRelease-1>", lambda e, c=cmd: safe_cmd(c))
+
+            # 悬停高亮 + 子菜单展开/收起（i>=1 是设置及子菜单）
             canvas.tag_bind(rect_id, "<Enter>",
-                            lambda e, r=rect_id: canvas.itemconfig(r, fill="#111111"))
+                            lambda e, r=rect_id, idx=i: _on_enter(r, idx))
             canvas.tag_bind(rect_id, "<Leave>",
-                            lambda e, r=rect_id: canvas.itemconfig(r, fill=""))
+                            lambda e, r=rect_id, idx=i: _on_leave(r, idx))
             canvas.tag_bind(text_id, "<Enter>",
-                            lambda e, r=rect_id: canvas.itemconfig(r, fill="#A12F2F"))
+                            lambda e, r=rect_id, idx=i: _on_enter(r, idx))
             canvas.tag_bind(text_id, "<Leave>",
-                            lambda e, r=rect_id: canvas.itemconfig(r, fill=""))
+                            lambda e, r=rect_id, idx=i: _on_leave(r, idx))
+
+        def _on_enter(rect_id, idx):
+            canvas.itemconfig(rect_id, fill="#111111")
+            if idx >= 1:
+                _show_sub()
+
+        def _on_leave(rect_id, idx):
+            canvas.itemconfig(rect_id, fill="")
+            if idx >= 1:
+                _hide_sub()
+
+    def _import_anime_cache(self):
+        """导入番剧缓存目录（kazumi TS 分片）进行离线检测"""
+        from tkinter import filedialog, simpledialog
+        from kazumi_processor import KazumiProcessor, find_video_files
+
+        # 默认路径
+        default_dir = os.path.join(os.environ.get("APPDATA", ""),
+                                   "com.example", "kazumi", "downloads")
+        directory = filedialog.askdirectory(
+            title="选择番剧缓存目录（支持 seg_*.ts / *.mp4）",
+            initialdir=default_dir if os.path.isdir(default_dir) else None)
+        if not directory:
+            return
+
+        # 扫描视频文件
+        video_files, file_type = find_video_files(directory)
+        if not video_files:
+            messagebox.showerror("错误", f"未找到视频文件:\n{directory}\n\n请选择包含 seg_*.ts 或 *.mp4 的目录")
+            return
+        file_label = "TS分片" if file_type == 'ts' else "MP4"
+
+        # 确认
+        ok = messagebox.askyesno(
+            "确认处理",
+            f"找到 {len(video_files)} 个{file_label}文件\n\n"
+            f"将离线检测作画张数（scale={CONFIG['SCALE_FACTOR']}）\n"
+            f"期间界面可能短暂卡顿\n\n是否继续？")
+        if not ok:
+            return
+
+        # 进度窗口
+        prog_win = tk.Toplevel(self.root)
+        prog_win.title("番剧缓存处理")
+        prog_win.geometry("500x220")
+        prog_win.configure(bg=color_manager.get_color('bg'))
+        prog_win.transient(self.root)
+        prog_win.grab_set()
+        prog_win.attributes("-topmost", True)
+
+        accent = color_manager.get_color('accent')
+        bg = color_manager.get_color('bg')
+        btn_bg = color_manager.get_color('btn_bg')
+
+        tk.Label(prog_win, text="番剧缓存处理中...", font=("Arial", 11, "bold"),
+                 fg=accent, bg=bg).pack(pady=(15, 5))
+
+        phase_label = tk.Label(prog_win, text="准备中...", fg=accent, bg=bg, font=("Arial", 9))
+        phase_label.pack()
+
+        info_label = tk.Label(prog_win, text="", fg=accent, bg=bg, font=("Arial", 9))
+        info_label.pack(pady=(5, 10))
+
+        # 进度条（Canvas 手绘）
+        bar_canvas = tk.Canvas(prog_win, width=400, height=24, bg=btn_bg, highlightthickness=0)
+        bar_canvas.pack(pady=5)
+        bar_rect = bar_canvas.create_rectangle(0, 0, 0, 24, fill=accent, outline="")
+
+        pct_label = tk.Label(prog_win, text="0%", fg=accent, bg=bg, font=("Arial", 9))
+        pct_label.pack()
+
+        cancel_btn = tk.Button(prog_win, text="取消", bg=btn_bg, fg=accent,
+                               font=("Arial", 9))
+        cancel_btn.pack(pady=10)
+
+        # 处理器（线程安全：通过 root.after 投递 UI 更新）
+        processor = KazumiProcessor()
+
+        def on_progress(phase, percent, msg):
+            """回调：工作线程调用 → root.after 投递到主线程"""
+            def _update():
+                if not prog_win.winfo_exists():
+                    return
+                try:
+                    phase_label.config(text=f"[{phase}] {msg}")
+                    bar_canvas.coords(bar_rect, 0, 0, int(400 * percent / 100), 24)
+                    pct_label.config(text=f"{percent:.0f}%")
+                    if phase == "完成":
+                        cancel_btn.config(text="关闭", command=lambda: on_done(None))
+                except Exception:
+                    pass
+            self.root.after(1, _update)
+
+        def on_done(report):
+            """完成：关闭进度窗，显示报告"""
+            if prog_win.winfo_exists():
+                prog_win.destroy()
+            if report:
+                _show_kazumi_report(self, report)
+
+        cancel_btn.config(command=processor.cancel)
+        processor.cb_progress = on_progress
+        processor.cb_done = on_done
+        processor.process(directory, scale=0.5)
+
+        # 防止被 GC
+        self._kazumi_processor = processor
 
     def _import_video(self):
         from tkinter import filedialog
@@ -2588,11 +3868,24 @@ class AnimeCelCounter:
         try:
             if self.frame_source:
                 self.frame_source.close()
-            self.frame_source = FrameSource(mode='video', video_path=file_path,
-                                            scale_factor=CONFIG["SCALE_FACTOR"],
-                                            use_gpu=self.use_gpu,
-                                            hw_accel=CONFIG.get("VIDEO_HW_ACCEL", True),
-                                            hash_enabled=(self.use_hash_filter or CONFIG.get("OPED_HASH_ENABLED", True)))
+            # ─── 优先尝试 NVDEC 管道（GPU 硬解+缩放，最快）───
+            if self.use_gpu:
+                try:
+                    self.frame_source = FFmpegNvDecSource(
+                        video_path=file_path,
+                        scale_factor=CONFIG["SCALE_FACTOR"],
+                        hash_enabled=(self.use_hash_filter or CONFIG.get("OPED_HASH_ENABLED", True)))
+                    print("[导入] 使用 FFmpeg NVDEC 硬解管道")
+                except Exception as e:
+                    print(f"[导入] NVDEC 管道失败 ({e})，回退 OpenCV")
+                    self.frame_source = None
+            # 回退：OpenCV VideoCapture
+            if self.frame_source is None:
+                self.frame_source = FrameSource(mode='video', video_path=file_path,
+                                                scale_factor=CONFIG["SCALE_FACTOR"],
+                                                use_gpu=self.use_gpu,
+                                                hw_accel=CONFIG.get("VIDEO_HW_ACCEL", True),
+                                                hash_enabled=(self.use_hash_filter or CONFIG.get("OPED_HASH_ENABLED", True)))
             self.video_mode = True
             self.frame_shape = self.frame_source.frame_shape
             self.reset_stats()
@@ -3161,6 +4454,10 @@ class AnimeCelCounter:
                   bg=btn_bg, fg=accent).pack(side="left", padx=3)
         tk.Button(row1, text="说明", command=self.open_readme,
                   bg=btn_bg, fg=accent).pack(side="left", padx=3)
+        self.switch_btn = tk.Button(row1, text="切换到视频" if not self.video_mode else "切换到实时",
+                                    command=self.toggle_video_mode,
+                                    bg=btn_bg, fg=accent)
+        self.switch_btn.pack(side="left", padx=3)
         tk.Button(row1, text="显示截图范围", command=self.show_crop_region, bg=btn_bg, fg=accent).pack(side="left", padx=3)
         tk.Button(row1, text="保存运行记录", command=self.record_manager._save_record,
                   bg=btn_bg, fg=accent).pack(side="left", padx=3)
@@ -3246,14 +4543,31 @@ class AnimeCelCounter:
                     time.sleep(0.001)
                     continue
                 ts, now_frame, bgr_raw, v_hash_256, v_oped_hash = frame_data
-                # 使用帧源提供的哈希，不再重复计算
-                hash_256 = v_hash_256 if self.use_hash_filter else None
-                oped_hash = v_oped_hash if CONFIG.get("OPED_HASH_ENABLED", True) else None
                 if ts is None or ts < 0:
                     ts = 0.0
                 if not self.video_is_playing:
                     time.sleep(0.001)
                     continue
+
+                # ─── 倍速播放：把视频时间戳换算成墙钟节奏 ───
+                speed = max(0.05, float(self.video_playback_speed or 1.0))
+                if speed != 1.0:
+                    if self._video_pace_origin is None:
+                        self._video_pace_origin = (time.perf_counter(), ts)
+                    wall0, ts0 = self._video_pace_origin
+                    target = wall0 + max(0.0, ts - ts0) / speed
+                    now_wall = time.perf_counter()
+                    if target > now_wall:
+                        # 慢放：等到目标时刻再处理（单次最多 50ms，保证暂停响应）
+                        time.sleep(min(target - now_wall, 0.05))
+                    elif speed > 1.0 and now_wall - target > 0.5:
+                        # 快放：处理速度跟不上时丢帧，保持播放进度
+                        self._video_dropped_frames += 1
+                        continue
+
+                # 使用帧源提供的哈希，不再重复计算
+                hash_256 = v_hash_256 if self.use_hash_filter else None
+                oped_hash = v_oped_hash if CONFIG.get("OPED_HASH_ENABLED", True) else None
                 with self.clock_lock:
                     self._current_clock = ts
             else:
@@ -3269,10 +4583,13 @@ class AnimeCelCounter:
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     now_frame = cv2.resize(gray, (0, 0), fx=CONFIG["SCALE_FACTOR"], fy=CONFIG["SCALE_FACTOR"])
                 ts = time.time()
-                if not hasattr(self, '_last_capture_time') or self._last_capture_time is None:
+                if self._last_capture_time is None:
                     self._last_capture_time = ts
                     self._realtime_elapsed = 0.0
                 dt = ts - self._last_capture_time
+                # 防止暂停/休眠后时间跳跃：dt > 2s 视为从暂停恢复
+                if dt > 2.0:
+                    dt = 0.0
                 self._last_capture_time = ts
                 self._realtime_elapsed += dt
                 with self.clock_lock:
@@ -3281,9 +4598,9 @@ class AnimeCelCounter:
                 if self.use_hash_filter or CONFIG.get("OPED_HASH_ENABLED", True):
                     hash_256, oped_hash = compute_all_hashes(now_frame)
 
-            # 获取上一帧
+            # 获取上一帧（不复制，last_frame 在写入时已是独立副本）
             with self.lock:
-                last = self.last_frame.copy() if self.last_frame is not None else None
+                last = self.last_frame if self.last_frame is not None else None
             if last is not None and last.shape != now_frame.shape:
                 last = None
 
@@ -3292,26 +4609,50 @@ class AnimeCelCounter:
             move_type = "静止"
 
             if last is not None:
-                raw_detected = is_raw_change(last, now_frame)
+                # ─── 差分统一走 CPU ───
+                # 实测 324x576：CPU 0.044ms / GPU 0.80ms。小帧上两次 upload
+                # 加一次 countNonZero 同步的开销远大于计算本身，GPU 只适合
+                # 完整检测里的角点+稀疏光流（大帧才有收益）。
+                _, _, precomputed_ratio = compute_diff_mask(last, now_frame)
+
+                raw_detected = is_raw_change(last, now_frame, precomputed_ratio=precomputed_ratio)
                 raw_new_cel = 1 if raw_detected else 0
 
-                basic_detected, move_type = basic_is_new_cel(last, now_frame)
+                basic_detected, move_type = basic_is_new_cel(last, now_frame, precomputed_ratio=precomputed_ratio)
                 if basic_detected:
-                    self.raw_detection_timestamps.append(self._current_clock)
+                    with self.clock_lock:
+                        self.raw_detection_timestamps.append(self._current_clock)
 
+                with self.clock_lock:
+                    clock_safe = self._current_clock
                 window_sec = CONFIG["FILTER_TRIGGER_WINDOW_MS"] / 1000.0
-                while self.raw_detection_timestamps and self.raw_detection_timestamps[0] < self._current_clock - window_sec:
+                while self.raw_detection_timestamps and self.raw_detection_timestamps[0] < clock_safe - window_sec:
                     self.raw_detection_timestamps.popleft()
 
                 if len(self.raw_detection_timestamps) >= CONFIG["FILTER_TRIGGER_COUNT"]:
                     if not self.full_filter_active:
                         self.full_filter_active = True
-                    self.full_filter_active_until = self._current_clock + CONFIG["FULL_FILTER_HOLD_SEC"]
-                elif self.full_filter_active and self._current_clock > self.full_filter_active_until:
+                    self.full_filter_active_until = clock_safe + CONFIG["FULL_FILTER_HOLD_SEC"]
+                elif self.full_filter_active and clock_safe > self.full_filter_active_until:
                     self.full_filter_active = False
 
                 if self.full_filter_active:
-                    final_detected, move_type = full_is_new_cel(last, now_frame, self.use_optical_flow, use_gpu=self.use_gpu, lk_cuda=self.lk_cuda)
+                    # GPU 路径：按像素数门槛决定是否上传（小帧上传反而更慢）
+                    gpu_ctx = self.gpu_ctx
+                    frames_uploaded = False
+                    if (self.use_gpu and gpu_ctx is not None
+                            and gpu_ctx.usable_for_flow(now_frame.shape)):
+                        try:
+                            gpu_ctx.upload_pair(last, now_frame)
+                            frames_uploaded = True
+                        except Exception:  # noqa: BLE001
+                            frames_uploaded = False
+                    final_detected, move_type = full_is_new_cel(
+                        last, now_frame, self.use_optical_flow,
+                        use_gpu=self.use_gpu, lk_cuda=self.lk_cuda,
+                        precomputed_ratio=precomputed_ratio,
+                        gpu_ctx=gpu_ctx if frames_uploaded else None,
+                        frames_uploaded=frames_uploaded)
                 else:
                     final_detected = basic_detected
 
@@ -3393,12 +4734,7 @@ class AnimeCelCounter:
                 self.oped_detector.sample(clock, fc, rc, oped_hash)
                 self.instant_fps_history.append((clock, self.current_cels))
 
-            # 视频播放倍速简单实现：通过 sleep 控制帧率
-            if self.video_mode and self.video_is_playing:
-                # 基于视频时间戳计算睡眠时间，实现倍速
-                # 简化：每帧后 sleep 一段时间
-                # 实际应该计算目标播放速度下的帧间隔，但这里仅示例
-                pass
+            # 视频倍速已在取帧处按「视频时间戳 → 墙钟」的节奏实现（见上方 throttle）
 
     # ==================== UI 更新与波形 ====================
     def loop(self):
@@ -3477,6 +4813,59 @@ class AnimeCelCounter:
         time_str = f"{self._format_time(current_time)}/{self._format_time(duration)}"
         self.video_controls['time_label'].config(text=time_str)
 
+    def toggle_video_mode(self):
+        """在实时模式和视频导入模式之间切换"""
+        if self.video_mode:
+            # 从视频切回实时
+            self.video_mode = False
+            CONFIG["VIDEO_MODE"] = False
+            CONFIG["VIDEO_FILE_PATH"] = ""
+            if self.frame_source:
+                self.frame_source.close()
+                self.frame_source = None
+            self.reset_stats()  # 重置统计并重启摄像头
+            self.video_is_playing = True
+            self.is_running = True
+            self._run_event.set()
+            # 如果存在视频控制条，隐藏它
+            if self.video_controls and self.video_controls['frame'].winfo_exists():
+                self.video_controls['frame'].pack_forget()
+            self._save_all_settings()
+            # 更新按钮文字
+            if hasattr(self, 'switch_btn') and self.switch_btn.winfo_exists():
+                self.switch_btn.config(text="切换到视频")
+        else:
+            # 从实时切换到视频（复用原有的导入逻辑）
+            from tkinter import filedialog
+            file_path = filedialog.askopenfilename(
+                filetypes=[("Video files", "*.mp4 *.avi *.mkv *.mov")])
+            if not file_path:
+                return
+            try:
+                if self.frame_source:
+                    self.frame_source.close()
+                self.frame_source = FrameSource(
+                    mode='video', video_path=file_path,
+                    scale_factor=CONFIG["SCALE_FACTOR"],
+                    use_gpu=self.use_gpu,
+                    hw_accel=CONFIG.get("VIDEO_HW_ACCEL", True),
+                    hash_enabled=(self.use_hash_filter or CONFIG.get("OPED_HASH_ENABLED", True))
+                )
+                self.video_mode = True
+                CONFIG["VIDEO_MODE"] = True
+                CONFIG["VIDEO_FILE_PATH"] = file_path
+                self.frame_shape = self.frame_source.frame_shape
+                self.reset_stats()
+                self.video_is_playing = True
+                self.is_running = True
+                self._run_event.set()
+                self._realtime_elapsed = 0.0
+                self._save_all_settings()
+                # 更新按钮文字
+                if hasattr(self, 'switch_btn') and self.switch_btn.winfo_exists():
+                    self.switch_btn.config(text="切换到实时")
+            except Exception as e:
+                messagebox.showerror("导入失败", f"无法打开视频文件：{e}")
     def _format_time(self, seconds):
         m, s = divmod(int(seconds), 60)
         return f"{m:02d}:{s:02d}"
@@ -3487,22 +4876,33 @@ class AnimeCelCounter:
         total_dur = self.frame_source.video_duration
         pos = float(value) / 100.0 * total_dur
         self.frame_source.seek(pos)
-        # Seek 后重置状态，避免统计错乱
-        self.reset_stats()
-        self._last_recorded_time = -1
+        # 轻量重置：保留 OP/ED 模板，仅清除帧计数和统计状态
         with self.lock:
-            self.last_frame = None
             self.recent_frames.clear()
             self.recent_sum = 0
+            self.current_cels = 0.0
             self.recent_frames_raw.clear()
             self.recent_sum_raw = 0
-            self.current_cels = 0.0
             self.current_raw_cels = 0.0
+            self.last_frame = None
+            self.frame_buffer.clear()
+        self.total_sum = 0.0
+        self.total_count = 0
+        self._last_recorded_time = -1
+        self.full_filter_active = False
+        self.full_filter_active_until = 0
+        self.raw_detection_timestamps.clear()
+        self.idle_start_time = None
+        # 倍速节流基准重置，否则 seek 后墙钟目标会落后一大截，疯狂丢帧
+        self._video_pace_origin = None
+        self._video_dropped_frames = 0
 
     def _on_speed_change(self, value):
-        speed = float(value.replace('x', ''))
+        speed = float(str(value).replace('x', ''))
         CONFIG["VIDEO_PLAYBACK_SPEED"] = speed
         self.video_playback_speed = speed
+        # 换挡时重新建立基准，避免沿用旧节奏
+        self._video_pace_origin = None
 
     def pause_video(self):
         self.video_is_playing = False
@@ -3521,16 +4921,50 @@ class AnimeCelCounter:
         self.last_loop_time = time.time()
         if self.frame_source:
             self.frame_source.resume()
+        # 恢复播放时重置节流基准，避免把暂停时长算进播放进度
+        self._video_pace_origin = None
         if self.video_controls:
             self.video_controls['play_var'].set(True)
             self.video_controls['play_btn'].config(text="⏸")
 
     def _save_gpu_video_config(self, gpu_enabled, speed_str):
-        CONFIG["GPU_ENABLED"] = gpu_enabled
         try:
-            CONFIG["VIDEO_PLAYBACK_SPEED"] = float(speed_str)
-        except:
+            speed = float(str(speed_str).replace('x', ''))
+            CONFIG["VIDEO_PLAYBACK_SPEED"] = speed
+            self.video_playback_speed = speed
+            self._video_pace_origin = None
+        except (TypeError, ValueError):
             pass
+
+        info = gpu_probe()
+        self.gpu_info = info
+        want_gpu = bool(gpu_enabled) and info.flow_ready
+        if gpu_enabled and not info.flow_ready:
+            messagebox.showwarning(
+                "GPU 不可用",
+                f"{info.summary()}\n\n"
+                "自检未通过，已保持 CPU 模式（不会假装启用）。\n"
+                "可用 `python tests/test_pipeline.py` 查看具体失败项。")
+        CONFIG["GPU_ENABLED"] = want_gpu
+        if want_gpu and not self.use_gpu:
+            try:
+                self.gpu_ctx = GPUContext(info)
+                self.lk_cuda = self.gpu_ctx.lk
+                self.use_gpu = True
+            except Exception as e:  # noqa: BLE001
+                print(f"[GPU] 启用失败: {e}，保持 CPU")
+                self.use_gpu = False
+                self.gpu_ctx = None
+                self.lk_cuda = None
+        elif not want_gpu and self.use_gpu:
+            if self.gpu_ctx is not None:
+                try:
+                    self.gpu_ctx.release()
+                except Exception:  # noqa: BLE001
+                    pass
+            self.gpu_ctx = None
+            self.lk_cuda = None
+            self.use_gpu = False
         self._save_all_settings()
 
     def pause(self):
@@ -3609,9 +5043,6 @@ class AnimeCelCounter:
         self.oped_detector.reset()
         self.instant_fps_history.clear()
 
-        with self.time_lock:
-            self.skip_until_elapsed = 0.0
-
         accent = color_manager.get_color('accent')
         self.lb_rt.config(text="实时张数：0.0 ")
         self.lb_total_time.config(text="运行时长：0.0 s")
@@ -3633,14 +5064,15 @@ class AnimeCelCounter:
 
         if self.video_mode and self.frame_source:
             self.frame_source.seek(0)
-            self.video_clock = 0.0
 
     def _save_profile(self):
+        if not self._profile_enabled or self.profiler is None:
+            return
         try:
             self.profiler.disable()
             self.profiler.dump_stats("profile_output.prof")
             print("[Profiler] 数据已保存至 profile_output.prof")
-        except:
+        except Exception:
             pass
 
     def _on_close(self):
@@ -3650,6 +5082,11 @@ class AnimeCelCounter:
         self.preview_manager.stop()
         if self.frame_source:
             self.frame_source.close()
+        if self.gpu_ctx is not None:
+            try:
+                self.gpu_ctx.release()
+            except Exception:
+                pass
         if hasattr(self, 'capture_thread') and self.capture_thread.is_alive():
             self.capture_thread.join(timeout=2.0)
         if hasattr(self.preview_manager, 'thread') and self.preview_manager.thread and self.preview_manager.thread.is_alive():
@@ -3731,7 +5168,7 @@ class AnimeCelCounter:
                               CONFIG["WAVE2_HISTORY_SEC"], CONFIG["WAVE_MAX_Y"], "25min")
 
     def _draw_wave_multi(self, canvas, data_list, history_sec, y_max, title=""):
-        canvas.delete("all")
+        """增量波形绘制：仅重绘数据线和OP/ED高亮，保留坐标轴"""
         width = canvas.winfo_width()
         height = canvas.winfo_height()
         if width < 50 or height < 50:
@@ -3744,10 +5181,26 @@ class AnimeCelCounter:
         now = self._current_clock
         start = now - history_sec
         accent = color_manager.get_color('accent')
-        self._draw_axes_only(canvas, plot_w, plot_h, y_max, accent)
-        if title:
-            canvas.create_text(self.wave_margin_left, self.wave_margin_top - 5,
-                               text=title, fill=accent, font=("Arial", 8), anchor="nw")
+
+        # 检查是否需要重建坐标轴（尺寸变化或首次绘制）
+        if not hasattr(canvas, '_wave_plot_w') or canvas._wave_plot_w != plot_w or canvas._wave_plot_h != plot_h:
+            canvas.delete("all")
+            self._draw_axes_only(canvas, plot_w, plot_h, y_max, accent)
+            if title:
+                canvas.create_text(self.wave_margin_left, self.wave_margin_top - 5,
+                                   text=title, fill=accent, font=("Arial", 8), anchor="nw")
+            canvas._wave_plot_w = plot_w
+            canvas._wave_plot_h = plot_h
+            canvas._wave_data_ids = []
+            canvas._wave_oped_ids = []
+        else:
+            # 增量更新：仅清除数据线和OP/ED高亮
+            for item_id in getattr(canvas, '_wave_data_ids', []):
+                canvas.delete(item_id)
+            for item_id in getattr(canvas, '_wave_oped_ids', []):
+                canvas.delete(item_id)
+        canvas._wave_data_ids = []
+        canvas._wave_oped_ids = []
 
         if CONFIG["OPED_DETECTION_ENABLED"]:
             mark_color = "#FFD700"
@@ -3758,16 +5211,18 @@ class AnimeCelCounter:
                     x1 = self.wave_margin_left + plot_w * (max(s, start_t) - start_t) / history_sec
                     x2 = self.wave_margin_left + plot_w * (min(e, now) - start_t) / history_sec
                     color = seg_colors.get(sid, mark_color)
-                    canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
-                                            fill=color, outline="", stipple="gray25")
+                    rid = canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
+                                                  fill=color, outline="", stipple="gray25")
+                    canvas._wave_oped_ids.append(rid)
             if self.oped_detector.match_active and self.oped_detector.match_start is not None:
                 current_duration = now - self.oped_detector.match_start
                 if current_duration >= 10:
                     x1 = self.wave_margin_left + plot_w * (max(self.oped_detector.match_start, start_t) - start_t) / history_sec
                     x2 = self.wave_margin_left + plot_w * (min(now, now) - start_t) / history_sec
                     color = seg_colors.get(self.oped_detector.pending_id, '#FFD700') if self.oped_detector.pending_id is not None else '#FFD700'
-                    canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
-                                            fill=color, outline="", stipple="gray25")
+                    rid = canvas.create_rectangle(x1, self.wave_margin_top, x2, self.wave_margin_top + plot_h,
+                                                  fill=color, outline="", stipple="gray25")
+                    canvas._wave_oped_ids.append(rid)
 
         for wave_data, color in data_list:
             points = [(t, v) for t, v in wave_data if start <= t <= now]
@@ -3784,7 +5239,8 @@ class AnimeCelCounter:
                     y = plot_h - (max(buckets[x]) / y_max) * plot_h
                     line_pts.append((self.wave_margin_left + x, self.wave_margin_top + y))
             if len(line_pts) >= 2:
-                canvas.create_line(line_pts, fill=color, width=1, smooth=False)
+                lid = canvas.create_line(line_pts, fill=color, width=1, smooth=False)
+                canvas._wave_data_ids.append(lid)
 
     def _draw_axes_only(self, canvas, plot_w, plot_h, y_max, accent):
         canvas.create_line(self.wave_margin_left, self.wave_margin_top,
@@ -3949,6 +5405,129 @@ class AnimeCelCounter:
         if hasattr(self, '_settings_win') and self._settings_win is not None and self._settings_win.winfo_exists():
             refresh_ms = int(CONFIG["TOTAL_WAVE_REFRESH_SEC"] * 1000)
             self.root.after(refresh_ms, self._draw_settings_wave)
+
+def _show_kazumi_report(counter, report):
+    """显示番剧缓存处理结果报告窗口"""
+    import tkinter as tk
+    import tkinter.ttk as ttk
+
+    win = tk.Toplevel(counter.root)
+    win.title("番剧检测报告")
+    win.geometry("600x500")
+    win.configure(bg=color_manager.get_color('bg'))
+    win.transient(counter.root)
+    win.grab_set()
+
+    accent = color_manager.get_color('accent')
+    bg = color_manager.get_color('bg')
+    btn_bg = color_manager.get_color('btn_bg')
+
+    # 标题
+    title = os.path.basename(report.get("directory", ""))
+    tk.Label(win, text=f"番剧检测报告 — {title}", font=("Arial", 11, "bold"),
+             fg=accent, bg=bg).pack(pady=(10, 5))
+
+    # 基本信息
+    info_frame = tk.Frame(win, bg=bg)
+    info_frame.pack(fill="x", padx=20, pady=5)
+
+    oped_cels = report.get('oped_deducted_cels', 0)
+    oped_time = report.get('oped_deducted_time', 0)
+    oped_count = report.get('oped_intervals', 0)
+    info_items = [
+        ("分片数", f"{report.get('segments', 0)}"),
+        ("视频时长", f"{report.get('duration_min', 0):.1f} 分钟 ({report.get('duration_sec', 0):.0f} 秒)"),
+        ("处理帧数", f"{report.get('total_frames', 0)}"),
+        ("帧率", f"{report.get('video_fps', 0):.1f} fps"),
+        ("处理耗时", f"{report.get('elapsed_sec', 0):.1f} 秒 ({report.get('speedup', 0):.1f}x 实时)"),
+        ("缩放比例", f"{report.get('scale', 0)}"),
+        ("OP/ED段数", f"{oped_count}" if oped_count > 0 else "无"),
+        ("OP/ED扣除", f"{oped_cels} 张 / {oped_time:.1f}s" if oped_cels > 0 else "—"),
+    ]
+
+    for i, (label, value) in enumerate(info_items):
+        tk.Label(info_frame, text=f"{label}:", fg=accent, bg=bg,
+                 font=("Arial", 9, "bold")).grid(row=i, column=0, sticky="w", padx=5)
+        tk.Label(info_frame, text=value, fg=accent, bg=bg,
+                 font=("Arial", 9)).grid(row=i, column=1, sticky="w", padx=10)
+
+    # 核心数据
+    core_frame = tk.Frame(win, bg=bg)
+    core_frame.pack(fill="x", padx=20, pady=10)
+
+    total_cels = report.get("total_cels", 0)
+    net_cels = report.get("net_cels", total_cels)
+    avg_cels = report.get("avg_cels_per_sec", 0)
+    total_raw = report.get("total_raw", 0)
+    oped_cels = report.get("oped_deducted_cels", 0)
+
+    stat_items = [
+        (f"总张数\n(过滤后)", net_cels, 28),
+        (f"平均张/秒", f"{avg_cels:.1f}", 24),
+        (f"总张数\n(过滤前)", total_raw, 20),
+    ]
+    if oped_cels > 0:
+        stat_items.insert(1, (f"OP/ED扣除", f"-{oped_cels}", 20))
+
+    for text, value, size in stat_items:
+        frm = tk.Frame(core_frame, bg=btn_bg, bd=1, relief="solid")
+        frm.pack(side="left", expand=True, fill="both", padx=5)
+        tk.Label(frm, text=text, fg=accent, bg=btn_bg,
+                 font=("Arial", 8)).pack(pady=(5, 0))
+        tk.Label(frm, text=str(value), fg=accent, bg=btn_bg,
+                 font=("Arial", size, "bold")).pack(pady=(0, 5))
+
+    # 过滤明细
+    filter_frame = tk.LabelFrame(win, text="过滤明细", fg=accent, bg=bg,
+                                  font=("Arial", 9, "bold"))
+    filter_frame.pack(fill="both", expand=True, padx=20, pady=5)
+
+    tree = ttk.Treeview(filter_frame, columns=("type", "count"), show="headings", height=8)
+    tree.heading("type", text="过滤类型")
+    tree.heading("count", text="数量")
+    tree.column("type", width=200, anchor="w")
+    tree.column("count", width=100, anchor="e")
+
+    filtering = report.get("filtering", {})
+    items = [
+        ("全局平移对齐过滤", filtering.get("translation", 0)),
+        ("光流法过滤", filtering.get("optical_flow", 0)),
+        ("哈希重复帧过滤", filtering.get("hash", 0)),
+        ("静止过滤", filtering.get("still", 0)),
+        ("局部变化过滤", filtering.get("local", 0)),
+        ("缩放过滤", filtering.get("zoom", 0)),
+        ("其他", filtering.get("other", 0)),
+    ]
+    for name, val in items:
+        tree.insert("", tk.END, values=(name, val))
+
+    scroll = ttk.Scrollbar(filter_frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scroll.set)
+    tree.pack(side="left", fill="both", expand=True)
+    scroll.pack(side="right", fill="y")
+
+    # 按钮
+    btn_frame = tk.Frame(win, bg=bg)
+    btn_frame.pack(fill="x", padx=20, pady=10)
+
+    def save_report():
+        from tkinter import filedialog
+        import json as _json
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json", filetypes=[("JSON", "*.json")],
+            title="保存检测报告")
+        if path:
+            # 把 bytes 类型字段转字符串（Path 对象）
+            clean = {k: (str(v) if hasattr(v, 'parts') else v)
+                       for k, v in report.items()}
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(clean, f, indent=2, ensure_ascii=False)
+
+    tk.Button(btn_frame, text="保存报告 (JSON)", command=save_report,
+              bg=btn_bg, fg=accent).pack(side="left", padx=5)
+    tk.Button(btn_frame, text="关闭", command=win.destroy,
+              bg=btn_bg, fg=accent).pack(side="right", padx=5)
+
 
 if __name__ == "__main__":
     AnimeCelCounter()

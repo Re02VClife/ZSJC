@@ -15,7 +15,7 @@ def build_main_ui(master, counter):
     ui = {}
     TRANSPARENT = "#000000"
     main_frame = tk.Frame(master, bg=TRANSPARENT)
-    main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+    main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=3)
 
     info_frame = tk.Frame(main_frame, bg=TRANSPARENT, width=130, height=200)
     info_frame.grid(row=0, column=0, sticky="nw", padx=(0, 10), pady=(10, 0))
@@ -24,19 +24,19 @@ def build_main_ui(master, counter):
     accent = color_manager.get_color('accent')
     lb_rt = tk.Label(info_frame, text="实时张数：0.0 ", fg=accent, bg=TRANSPARENT,
                      font=("Arial", 10, "bold"), anchor="w")
-    lb_rt.pack(anchor="w", pady=3)
+    lb_rt.pack(anchor="w", pady=(3, 0))
     lb_total_time = tk.Label(info_frame, text="运行时长：0.0 s", fg=accent, bg=TRANSPARENT,
                              font=("Arial", 10, "bold"), anchor="w")
-    lb_total_time.pack(anchor="w", pady=3)
+    lb_total_time.pack(anchor="w", pady=0)
     lb_total_cels = tk.Label(info_frame, text="总张数：0", fg=accent, bg=TRANSPARENT,
                              font=("Arial", 10, "bold"), anchor="w")
-    lb_total_cels.pack(anchor="w", pady=3)
+    lb_total_cels.pack(anchor="w", pady=0)
     lb_avg = tk.Label(info_frame, text="总平均：0.0", fg=accent, bg=TRANSPARENT,
                       font=("Arial", 10, "bold"), anchor="w")
-    lb_avg.pack(anchor="w", pady=3)
+    lb_avg.pack(anchor="w", pady=0)
     lb_st = tk.Label(info_frame, text="静止/纯运镜", fg=accent, bg=TRANSPARENT,
                      font=("Arial", 10, "bold"), anchor="w")
-    lb_st.pack(anchor="w", pady=5)
+    lb_st.pack(anchor="w", pady=(0, 3))
 
     wave_frame = tk.Frame(main_frame, bg=TRANSPARENT, width=300, height=80)
     wave_frame.grid(row=0, column=1, sticky="n", padx=(0, 10), pady=(10, 0))
@@ -51,7 +51,7 @@ def build_main_ui(master, counter):
     canvas2.pack(fill=tk.BOTH, expand=True)
 
     btn_canvas = tk.Canvas(main_frame, bg=TRANSPARENT, highlightthickness=0, bd=0,
-                           width=120, height=150)
+                           width=120, height=180)
     btn_canvas.grid(row=0, column=3, sticky="n", padx=(0, 10), pady=(10, 0))
 
     ui['lb_rt'] = lb_rt
@@ -315,7 +315,7 @@ def create_settings_window(parent, counter):
     video_group.pack(fill="x", padx=5, pady=5)
 
     gpu_var = tk.BooleanVar(value=CONFIG.get("GPU_ENABLED", False))
-    tk.Checkbutton(video_group, text="启用 GPU 加速 (需 OpenCV CUDA)", variable=gpu_var,
+    tk.Checkbutton(video_group, text="启用 GPU 加速 (需 OpenCV CUDA，自检通过才生效)", variable=gpu_var,
                    fg=accent, bg=bg, selectcolor=btn_bg).pack(anchor="w", padx=5, pady=2)
 
     speed_label = tk.Label(video_group, text="默认播放速度:", fg=accent, bg=bg)

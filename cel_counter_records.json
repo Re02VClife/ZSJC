@@ -467,5 +467,114 @@
       "min_instant_fps": 0.0,
       "median_fps": 8.02
     }
+  },
+  {
+    "name": "无职下",
+    "record_time": "2026-06-12 02:02:11",
+    "start_timestamp": 1781180495.128381,
+    "end_timestamp": 1781200931.7853727,
+    "duration_sec": 16531.27,
+    "total_raw_cels": 170783,
+    "total_filtered_cels": 68529,
+    "filtering": {
+      "translation": 43948,
+      "optical_flow": 7139,
+      "hash": 9988,
+      "still": 4422,
+      "local_motion": 35048,
+      "zoom": 2345,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 238,
+      "total_deducted_time": 285.81,
+      "segments": [
+        {
+          "start": 325.99,
+          "end": 378.05,
+          "duration": 52.05,
+          "segment_id": 0,
+          "deducted_cels": 0,
+          "deducted_time": 52.05
+        },
+        {
+          "start": 9681.81,
+          "end": 9717.83,
+          "duration": 36.02,
+          "segment_id": 0,
+          "deducted_cels": 0,
+          "deducted_time": 36.02
+        },
+        {
+          "start": 9721.65,
+          "end": 9753.02,
+          "duration": 31.37,
+          "segment_id": 0,
+          "deducted_cels": 0,
+          "deducted_time": 31.37
+        },
+        {
+          "start": 13218.29,
+          "end": 13252.27,
+          "duration": 33.99,
+          "segment_id": 0,
+          "deducted_cels": 8,
+          "deducted_time": 33.99
+        },
+        {
+          "start": 13260.29,
+          "end": 13347.08,
+          "duration": 86.79,
+          "segment_id": 0,
+          "deducted_cels": 58,
+          "deducted_time": 86.79
+        },
+        {
+          "start": 13440.19,
+          "end": 13485.78,
+          "duration": 45.59,
+          "segment_id": 0,
+          "deducted_cels": 75,
+          "deducted_time": 45.59
+        }
+      ]
+    },
+    "avg_fps_filtered": 4.2,
+    "avg_fps_raw": 10.33,
+    "extra": {
+      "max_instant_fps": 25.58,
+      "min_instant_fps": 0.0,
+      "median_fps": 3.12
+    }
+  },
+  {
+    "name": "无职转生2-1",
+    "record_time": "2026-06-13 21:53:21",
+    "start_timestamp": 1781352143.097842,
+    "end_timestamp": 1781358801.03334,
+    "duration_sec": 5646.48,
+    "total_raw_cels": 57915,
+    "total_filtered_cels": 23231,
+    "filtering": {
+      "translation": 8811,
+      "optical_flow": 2912,
+      "hash": 3697,
+      "still": 1725,
+      "local_motion": 17106,
+      "zoom": 521,
+      "other": 0
+    },
+    "oped": {
+      "total_deducted_cels": 0,
+      "total_deducted_time": 0.0,
+      "segments": []
+    },
+    "avg_fps_filtered": 4.11,
+    "avg_fps_raw": 10.26,
+    "extra": {
+      "max_instant_fps": 16.16,
+      "min_instant_fps": 0.0,
+      "median_fps": 2.01
+    }
   }
 ]
