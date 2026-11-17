@@ -26,7 +26,7 @@
 ## 界面预览
 
 <p align="center">
-  <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/a221d6b3-5a72-4293-aeb3-961a79950517" />
+<img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/a221d6b3-5a72-4293-aeb3-961a79950517" />
 
 </p>
 默认生成在屏幕左上角，基本不影响观看，长按可拖动到任意位置
@@ -37,10 +37,10 @@
 设置窗口（参数 / 实时预览 / 总张数波形三块面板，右上角「布局 ▾」可切换
 经典三栏 / 参数优先 / 宽屏横排 / 上下分栏，也可以手动拖动后保存）。
 「视频模式 & GPU」在参数列表最下方；窗口和面板都有边界硬限制，拖不出可视区域：
-<img width="1059" height="747" alt="de73a12f-1269-4b69-9a52-22f069620784" src="https://github.com/user-attachments/assets/3c3f7dde-e0ed-403c-95ec-f62c3c02ae5c" />
+
 
 <p align="center">
-  <img src="assets/settings.png" alt="设置窗口" width="900">
+<img width="1059" height="747" alt="de73a12f-1269-4b69-9a52-22f069620784" src="https://github.com/user-attachments/assets/3c3f7dde-e0ed-403c-95ec-f62c3c02ae5c" />
 </p>
 
 ## 下载与运行
