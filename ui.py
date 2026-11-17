@@ -202,6 +202,11 @@ def create_settings_window(parent, counter):
         dy = event.y_root - win._drag_start_y
         new_x = win._drag_start_win_x + dx
         new_y = win._drag_start_win_y + dy
+        # 硬限制：窗口边缘永远留在屏幕内，拖不出去
+        max_x = max(0, win.winfo_screenwidth() - win.winfo_width())
+        max_y = max(0, win.winfo_screenheight() - win.winfo_height())
+        new_x = max(0, min(new_x, max_x))
+        new_y = max(0, min(new_y, max_y))
         win.geometry(f"+{new_x}+{new_y}")
 
     title_bar.bind("<Button-1>", start_move)
@@ -224,8 +229,11 @@ def create_settings_window(parent, counter):
     def do_resize(event):
         dx = event.x_root - win._resize_start_x
         dy = event.y_root - win._resize_start_y
-        new_w = max(400, win._resize_start_w + dx)
-        new_h = max(300, win._resize_start_h + dy)
+        # 硬限制：拉伸后的右下边缘也不能超出屏幕
+        max_w = max(400, win.winfo_screenwidth() - win.winfo_x())
+        max_h = max(300, win.winfo_screenheight() - win.winfo_y())
+        new_w = max(400, min(win._resize_start_w + dx, max_w))
+        new_h = max(300, min(win._resize_start_h + dy, max_h))
         win.geometry(f"{new_w}x{new_h}")
 
     resize_handle.bind("<Button-1>", start_resize)
@@ -318,9 +326,12 @@ def create_settings_window(parent, counter):
     lock_check.pack(side=tk.RIGHT, padx=10)
     toggle_lock()
 
-    # ========== 视频模式 & GPU 设置组 ==========
-    video_group = tk.LabelFrame(param_panel.content, text="视频模式 & GPU", fg=accent, bg=bg, font=("Arial", 9, "bold"))
-    video_group.pack(fill="x", padx=5, pady=5)
+    # ========== 视频模式 & GPU 设置组（放在参数列表最下方，跨两列）==========
+    _param_parent = getattr(counter, 'settings_scroll_frame', param_panel.content)
+    video_group = tk.LabelFrame(_param_parent, text="视频模式 & GPU", fg=accent, bg=bg,
+                                font=("Arial", 9, "bold"))
+    video_group.grid(row=1, column=0, columnspan=2, sticky="ew",
+                     padx=5, pady=(12, 6))
 
     gpu_var = tk.BooleanVar(value=CONFIG.get("GPU_ENABLED", False))
     tk.Checkbutton(video_group, text="启用 GPU 加速 (需 OpenCV CUDA，自检通过才生效)", variable=gpu_var,

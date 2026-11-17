@@ -984,21 +984,32 @@ class DraggablePanel:
         if mode == "move":
             new_x = self.frame.winfo_x() + dx
             new_y = self.frame.winfo_y() + dy
+            # 硬限制：面板整体不能拖出父容器（标题栏始终可见）
+            pw = self.parent.winfo_width()
+            ph = self.parent.winfo_height()
+            fw = self.frame.winfo_width()
+            fh = self.frame.winfo_height()
+            new_x = max(0, min(new_x, max(0, pw - fw)))
+            new_y = max(0, min(new_y, max(0, ph - fh)))
             self.frame.place(x=new_x, y=new_y)
             self._drag_data["x"] = event.x_root
             self._drag_data["y"] = event.y_root
         elif mode == "resize_se":
             orig = self._drag_data["init_geom"]
-            new_w = max(self.min_width, orig[2] + dx)
-            new_h = max(self.min_height, orig[3] + dy)
+            pw = max(self.min_width, self.parent.winfo_width() - self.frame.winfo_x())
+            ph = max(self.min_height, self.parent.winfo_height() - self.frame.winfo_y())
+            new_w = max(self.min_width, min(orig[2] + dx, pw))
+            new_h = max(self.min_height, min(orig[3] + dy, ph))
             self.frame.place(width=new_w, height=new_h)
         elif mode == "resize_e":
             orig = self._drag_data["init_geom"]
-            new_w = max(self.min_width, orig[2] + dx)
+            pw = max(self.min_width, self.parent.winfo_width() - self.frame.winfo_x())
+            new_w = max(self.min_width, min(orig[2] + dx, pw))
             self.frame.place(width=new_w)
         elif mode == "resize_s":
             orig = self._drag_data["init_geom"]
-            new_h = max(self.min_height, orig[3] + dy)
+            ph = max(self.min_height, self.parent.winfo_height() - self.frame.winfo_y())
+            new_h = max(self.min_height, min(orig[3] + dy, ph))
             self.frame.place(height=new_h)
 
     def end_drag(self, event):
@@ -1025,17 +1036,15 @@ class DraggablePanel:
         x, y, w, h = geom
         parent_w = self.parent.winfo_width()
         parent_h = self.parent.winfo_height()
+        w = max(self.min_width, int(w))
+        h = max(self.min_height, int(h))
         if parent_w > 10 and parent_h > 10:
-            min_visible = 50
-            if x + w < min_visible:
-                x = min_visible - w
-            if x > parent_w - min_visible:
-                x = parent_w - min_visible
-            if y + h < min_visible:
-                y = min_visible - h
-            if y > parent_h - min_visible:
-                y = parent_h - min_visible
-        self.frame.place(x=x, y=y, width=max(self.min_width, w), height=max(self.min_height, h))
+            # 硬限制：面板必须完整落在父容器内
+            w = min(w, parent_w)
+            h = min(h, parent_h)
+            x = max(0, min(int(x), parent_w - w))
+            y = max(0, min(int(y), parent_h - h))
+        self.frame.place(x=x, y=y, width=w, height=h)
 # ====== Module: detection.py ======
 # detection.py
 """
@@ -3045,6 +3054,11 @@ def create_settings_window(parent, counter):
         dy = event.y_root - win._drag_start_y
         new_x = win._drag_start_win_x + dx
         new_y = win._drag_start_win_y + dy
+        # 硬限制：窗口边缘永远留在屏幕内，拖不出去
+        max_x = max(0, win.winfo_screenwidth() - win.winfo_width())
+        max_y = max(0, win.winfo_screenheight() - win.winfo_height())
+        new_x = max(0, min(new_x, max_x))
+        new_y = max(0, min(new_y, max_y))
         win.geometry(f"+{new_x}+{new_y}")
 
     title_bar.bind("<Button-1>", start_move)
@@ -3067,8 +3081,11 @@ def create_settings_window(parent, counter):
     def do_resize(event):
         dx = event.x_root - win._resize_start_x
         dy = event.y_root - win._resize_start_y
-        new_w = max(400, win._resize_start_w + dx)
-        new_h = max(300, win._resize_start_h + dy)
+        # 硬限制：拉伸后的右下边缘也不能超出屏幕
+        max_w = max(400, win.winfo_screenwidth() - win.winfo_x())
+        max_h = max(300, win.winfo_screenheight() - win.winfo_y())
+        new_w = max(400, min(win._resize_start_w + dx, max_w))
+        new_h = max(300, min(win._resize_start_h + dy, max_h))
         win.geometry(f"{new_w}x{new_h}")
 
     resize_handle.bind("<Button-1>", start_resize)
@@ -3161,9 +3178,12 @@ def create_settings_window(parent, counter):
     lock_check.pack(side=tk.RIGHT, padx=10)
     toggle_lock()
 
-    # ========== 视频模式 & GPU 设置组 ==========
-    video_group = tk.LabelFrame(param_panel.content, text="视频模式 & GPU", fg=accent, bg=bg, font=("Arial", 9, "bold"))
-    video_group.pack(fill="x", padx=5, pady=5)
+    # ========== 视频模式 & GPU 设置组（放在参数列表最下方，跨两列）==========
+    _param_parent = getattr(counter, 'settings_scroll_frame', param_panel.content)
+    video_group = tk.LabelFrame(_param_parent, text="视频模式 & GPU", fg=accent, bg=bg,
+                                font=("Arial", 9, "bold"))
+    video_group.grid(row=1, column=0, columnspan=2, sticky="ew",
+                     padx=5, pady=(12, 6))
 
     gpu_var = tk.BooleanVar(value=CONFIG.get("GPU_ENABLED", False))
     tk.Checkbutton(video_group, text="启用 GPU 加速 (需 OpenCV CUDA，自检通过才生效)", variable=gpu_var,
@@ -4069,6 +4089,8 @@ class AnimeCelCounter:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         self.settings_canvas = canvas
+        # 供 ui.py 把「视频模式 & GPU」放到参数列表最下面（跨两列）
+        self.settings_scroll_frame = scroll_frame
 
         accent = color_manager.get_color('accent')
         bg = color_manager.get_color('bg')

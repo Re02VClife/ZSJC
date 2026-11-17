@@ -630,6 +630,8 @@ class AnimeCelCounter:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         self.settings_canvas = canvas
+        # 供 ui.py 把「视频模式 & GPU」放到参数列表最下面（跨两列）
+        self.settings_scroll_frame = scroll_frame
 
         accent = color_manager.get_color('accent')
         bg = color_manager.get_color('bg')

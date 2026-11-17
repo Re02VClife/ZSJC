@@ -87,21 +87,32 @@ class DraggablePanel:
         if mode == "move":
             new_x = self.frame.winfo_x() + dx
             new_y = self.frame.winfo_y() + dy
+            # 硬限制：面板整体不能拖出父容器（标题栏始终可见）
+            pw = self.parent.winfo_width()
+            ph = self.parent.winfo_height()
+            fw = self.frame.winfo_width()
+            fh = self.frame.winfo_height()
+            new_x = max(0, min(new_x, max(0, pw - fw)))
+            new_y = max(0, min(new_y, max(0, ph - fh)))
             self.frame.place(x=new_x, y=new_y)
             self._drag_data["x"] = event.x_root
             self._drag_data["y"] = event.y_root
         elif mode == "resize_se":
             orig = self._drag_data["init_geom"]
-            new_w = max(self.min_width, orig[2] + dx)
-            new_h = max(self.min_height, orig[3] + dy)
+            pw = max(self.min_width, self.parent.winfo_width() - self.frame.winfo_x())
+            ph = max(self.min_height, self.parent.winfo_height() - self.frame.winfo_y())
+            new_w = max(self.min_width, min(orig[2] + dx, pw))
+            new_h = max(self.min_height, min(orig[3] + dy, ph))
             self.frame.place(width=new_w, height=new_h)
         elif mode == "resize_e":
             orig = self._drag_data["init_geom"]
-            new_w = max(self.min_width, orig[2] + dx)
+            pw = max(self.min_width, self.parent.winfo_width() - self.frame.winfo_x())
+            new_w = max(self.min_width, min(orig[2] + dx, pw))
             self.frame.place(width=new_w)
         elif mode == "resize_s":
             orig = self._drag_data["init_geom"]
-            new_h = max(self.min_height, orig[3] + dy)
+            ph = max(self.min_height, self.parent.winfo_height() - self.frame.winfo_y())
+            new_h = max(self.min_height, min(orig[3] + dy, ph))
             self.frame.place(height=new_h)
 
     def end_drag(self, event):
@@ -128,14 +139,12 @@ class DraggablePanel:
         x, y, w, h = geom
         parent_w = self.parent.winfo_width()
         parent_h = self.parent.winfo_height()
+        w = max(self.min_width, int(w))
+        h = max(self.min_height, int(h))
         if parent_w > 10 and parent_h > 10:
-            min_visible = 50
-            if x + w < min_visible:
-                x = min_visible - w
-            if x > parent_w - min_visible:
-                x = parent_w - min_visible
-            if y + h < min_visible:
-                y = min_visible - h
-            if y > parent_h - min_visible:
-                y = parent_h - min_visible
-        self.frame.place(x=x, y=y, width=max(self.min_width, w), height=max(self.min_height, h))
+            # 硬限制：面板必须完整落在父容器内
+            w = min(w, parent_w)
+            h = min(h, parent_h)
+            x = max(0, min(int(x), parent_w - w))
+            y = max(0, min(int(y), parent_h - h))
+        self.frame.place(x=x, y=y, width=w, height=h)
