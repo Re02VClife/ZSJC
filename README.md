@@ -26,7 +26,8 @@
 ## 界面预览
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="主界面" width="900">
+  <img width="1919" height="1079" alt="image" src="https://github.com/user-attachments/assets/a221d6b3-5a72-4293-aeb3-961a79950517" />
+
 </p>
 
 左侧是实时统计（实时张数 / 运行时长 / 总张数 / 总平均 / 当前滤波阶段），
