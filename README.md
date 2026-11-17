@@ -45,13 +45,20 @@
 
 ## 下载与运行
 
-从 [Releases](https://github.com/Re02VClife/ZSJC/releases/latest) 下载
-`ZSJC-v0.3-win64.zip`（约 820MB），解压后直接运行 `张数计数器.exe`
-（免安装、不需要 Python）。
+从 [Releases](https://github.com/Re02VClife/ZSJC/releases/latest) 下载，二选一：
 
-- 包内已包含自编译的 OpenCV 4.10 CUDA 运行时（约 1.3GB），**不需要另外安装 CUDA**；
-- 需要 NVIDIA 显卡驱动 531.61 或更新版本（RTX 30 系已验证）；
-- 没有 NVIDIA 显卡或驱动过旧时会自动退回 CPU，功能完整、速度较低；
+| 版本 | 文件 | 大小 | 适用场景 |
+|---|---|---|---|
+| 完整版 | `ZSJC-v0.3.1-win64.zip` | 约 820 MB | 有 NVIDIA 显卡，可开 GPU 光流 |
+| 轻量版 | `ZSJC-v0.3.1-lite-win64.zip` | **约 58 MB** | 纯 CPU，任何 Windows x64 |
+
+两个版本解压后直接运行 exe，不需要安装 Python。
+
+- 完整版内置 OpenCV 4.10 CUDA 运行时与 CUDA 11.8 依赖（**不需要另装 CUDA**），
+  需要 NVIDIA 显卡驱动 531.61 或更新版本（RTX 30 系已验证）；
+- 轻量版用官方 `opencv-python` 构建，体积小 14 倍，功能完全一致（OP/ED 检测、
+  批量提取、参数设置与布局预设都在），只是没有 GPU 光流；
+- 没有 NVIDIA 显卡时完整版会自动退回 CPU，但纯 CPU 使用建议直接下轻量版；
 - 首次运行如果被 SmartScreen 拦截，点「更多信息 → 仍要运行」。
 
 也可以直接用源码运行：
@@ -159,6 +166,8 @@ ZSJC/
 ├── kazumi_processor.py   # 番剧缓存处理（GUI「导入番剧」用）
 ├── diagnose.py           # 逐阶段性能诊断（CLI）
 ├── build.py              # 多模块合并为单文件 ZhangShuJianCe.py
+├── main.spec             # PyInstaller 完整版（含自编译 OpenCV CUDA 运行时）
+├── main_lite.spec        # PyInstaller 轻量版（CPU-only，约 58MB）
 ├── tests/test_pipeline.py# 回归测试（GPU/CPU 一致性、端到端、视频帧源）
 ├── 日志.md               # 开发日志与实测数据
 ├── 项目分析报告.md       # 历史代码审查报告
