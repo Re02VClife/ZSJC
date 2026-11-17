@@ -129,6 +129,12 @@ def create_settings_window(parent, counter):
     win.attributes("-alpha", CONFIG["ALPHA"])
     win.configure(bg=color_manager.get_color('bg'))
     win.geometry("1200x760")
+    # 设置窗口必须在主窗口之上；主窗口是 -topmost 的，不临时让位的话
+    # 两个自定义标题栏重叠时点击会被主窗口吃掉，表现为“拖不动”。
+    counter._root_topmost_before = bool(counter.root.attributes('-topmost'))
+    counter.root.attributes('-topmost', False)
+    win.attributes('-topmost', True)
+    win.lift()
 
     def on_close():
         # 保存颜色配置
@@ -146,6 +152,8 @@ def create_settings_window(parent, counter):
             counter.layouts["默认布局"] = current_layout
             counter.active_layout = "默认布局"
         counter._save_all_settings()
+        # 恢复主窗口置顶
+        counter.root.attributes('-topmost', getattr(counter, '_root_topmost_before', True))
         if hasattr(counter, 'settings_canvas'):
             counter.settings_canvas.unbind_all("<MouseWheel>")
         counter._settings_win = None
@@ -332,14 +340,71 @@ def create_settings_window(parent, counter):
     tk.Button(video_group, text="应用视频设置", command=save_settings,
               bg=btn_bg, fg=accent).pack(pady=5)
 
-    # 应用布局
+    # ==================== 布局预设 ====================
+    # 坐标是相对 main_frame 的 (x, y, 宽, 高)；窗口高度里已经扣掉 30px 标题栏。
+    presets = {
+        "经典三栏": {
+            "window": "1200x760",
+            "panels": {"params": (8, 6, 424, 726),
+                       "preview": (440, 6, 750, 350),
+                       "wave": (440, 362, 750, 726)},
+        },
+        "参数优先": {
+            "window": "1120x830",
+            "panels": {"params": (8, 6, 700, 796),
+                       "preview": (716, 6, 396, 392),
+                       "wave": (716, 404, 396, 796)},
+        },
+        "宽屏横排": {
+            "window": "1560x740",
+            "panels": {"params": (8, 6, 504, 706),
+                       "preview": (520, 6, 512, 706),
+                       "wave": (1040, 6, 512, 706)},
+        },
+        "上下分栏": {
+            "window": "1000x980",
+            "panels": {"params": (8, 6, 984, 460),
+                       "preview": (8, 472, 490, 952),
+                       "wave": (506, 472, 486, 952)},
+        },
+    }
+
+    def apply_preset(name):
+        preset = presets.get(name)
+        if not preset:
+            return
+        win.geometry(preset["window"])
+        win.update_idletasks()
+        for key, geom in preset["panels"].items():
+            if key in panels:
+                panels[key].apply_geometry(geom)
+        counter.active_layout = name
+        counter.layouts[name] = {
+            "window_geometry": preset["window"],
+            "panels": {k: tuple(v) for k, v in preset["panels"].items()},
+        }
+
+    layout_btn = tk.Menubutton(title_bar, text="布局 ▾", bg=btn_bg, fg=accent,
+                               bd=0, activebackground="#444444",
+                               font=("Arial", 9), relief=tk.FLAT)
+    layout_menu = tk.Menu(layout_btn, tearoff=0, bg=btn_bg, fg=accent,
+                          activebackground="#444444", activeforeground=accent)
+    for _name in presets:
+        layout_menu.add_command(label=_name, command=lambda n=_name: apply_preset(n))
+    layout_btn.config(menu=layout_menu)
+    layout_btn.pack(side=tk.RIGHT, padx=6)
+
+    # 应用布局：有保存过的布局就还原，否则用经典三栏
     win.update_idletasks()
+    if counter.active_layout and counter.active_layout in counter.layouts:
+        counter._apply_layout(win, panels)
+    else:
+        apply_preset("经典三栏")
+
     preview_toggle_var.set(True)
     if not counter.preview_manager.active:
         counter.preview_manager.start()
-    counter._apply_layout(win, panels)
     win.after(100, counter._draw_settings_wave)
-
 
     win.protocol("WM_DELETE_WINDOW", on_close)
     return win

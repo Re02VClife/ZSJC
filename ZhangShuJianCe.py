@@ -2972,6 +2972,12 @@ def create_settings_window(parent, counter):
     win.attributes("-alpha", CONFIG["ALPHA"])
     win.configure(bg=color_manager.get_color('bg'))
     win.geometry("1200x760")
+    # 设置窗口必须在主窗口之上；主窗口是 -topmost 的，不临时让位的话
+    # 两个自定义标题栏重叠时点击会被主窗口吃掉，表现为“拖不动”。
+    counter._root_topmost_before = bool(counter.root.attributes('-topmost'))
+    counter.root.attributes('-topmost', False)
+    win.attributes('-topmost', True)
+    win.lift()
 
     def on_close():
         # 保存颜色配置
@@ -2989,6 +2995,8 @@ def create_settings_window(parent, counter):
             counter.layouts["默认布局"] = current_layout
             counter.active_layout = "默认布局"
         counter._save_all_settings()
+        # 恢复主窗口置顶
+        counter.root.attributes('-topmost', getattr(counter, '_root_topmost_before', True))
         if hasattr(counter, 'settings_canvas'):
             counter.settings_canvas.unbind_all("<MouseWheel>")
         counter._settings_win = None
@@ -3175,14 +3183,71 @@ def create_settings_window(parent, counter):
     tk.Button(video_group, text="应用视频设置", command=save_settings,
               bg=btn_bg, fg=accent).pack(pady=5)
 
-    # 应用布局
+    # ==================== 布局预设 ====================
+    # 坐标是相对 main_frame 的 (x, y, 宽, 高)；窗口高度里已经扣掉 30px 标题栏。
+    presets = {
+        "经典三栏": {
+            "window": "1200x760",
+            "panels": {"params": (8, 6, 424, 726),
+                       "preview": (440, 6, 750, 350),
+                       "wave": (440, 362, 750, 726)},
+        },
+        "参数优先": {
+            "window": "1120x830",
+            "panels": {"params": (8, 6, 700, 796),
+                       "preview": (716, 6, 396, 392),
+                       "wave": (716, 404, 396, 796)},
+        },
+        "宽屏横排": {
+            "window": "1560x740",
+            "panels": {"params": (8, 6, 504, 706),
+                       "preview": (520, 6, 512, 706),
+                       "wave": (1040, 6, 512, 706)},
+        },
+        "上下分栏": {
+            "window": "1000x980",
+            "panels": {"params": (8, 6, 984, 460),
+                       "preview": (8, 472, 490, 952),
+                       "wave": (506, 472, 486, 952)},
+        },
+    }
+
+    def apply_preset(name):
+        preset = presets.get(name)
+        if not preset:
+            return
+        win.geometry(preset["window"])
+        win.update_idletasks()
+        for key, geom in preset["panels"].items():
+            if key in panels:
+                panels[key].apply_geometry(geom)
+        counter.active_layout = name
+        counter.layouts[name] = {
+            "window_geometry": preset["window"],
+            "panels": {k: tuple(v) for k, v in preset["panels"].items()},
+        }
+
+    layout_btn = tk.Menubutton(title_bar, text="布局 ▾", bg=btn_bg, fg=accent,
+                               bd=0, activebackground="#444444",
+                               font=("Arial", 9), relief=tk.FLAT)
+    layout_menu = tk.Menu(layout_btn, tearoff=0, bg=btn_bg, fg=accent,
+                          activebackground="#444444", activeforeground=accent)
+    for _name in presets:
+        layout_menu.add_command(label=_name, command=lambda n=_name: apply_preset(n))
+    layout_btn.config(menu=layout_menu)
+    layout_btn.pack(side=tk.RIGHT, padx=6)
+
+    # 应用布局：有保存过的布局就还原，否则用经典三栏
     win.update_idletasks()
+    if counter.active_layout and counter.active_layout in counter.layouts:
+        counter._apply_layout(win, panels)
+    else:
+        apply_preset("经典三栏")
+
     preview_toggle_var.set(True)
     if not counter.preview_manager.active:
         counter.preview_manager.start()
-    counter._apply_layout(win, panels)
     win.after(100, counter._draw_settings_wave)
-
 
     win.protocol("WM_DELETE_WINDOW", on_close)
     return win
@@ -3665,8 +3730,14 @@ class AnimeCelCounter:
             self.use_hash_filter = data.get("use_hash_filter", True)
             self.hash_threshold = CONFIG["HASH_THRESHOLD"]
             self.frame_buffer = deque(maxlen=CONFIG["FRAME_BUFFER_SIZE"])
-            self.layouts = data.get("layouts", {})
-            self.active_layout = data.get("active_layout", None)
+            # 布局格式版本：v1 的旧布局是面板随意叠放、窗口可能超出屏幕，
+            # 升级到 v2（预设布局）后直接忽略，避免打开设置就是一团乱。
+            if data.get("layout_version") != 2:
+                self.layouts = {}
+                self.active_layout = None
+            else:
+                self.layouts = data.get("layouts", {})
+                self.active_layout = data.get("active_layout", None)
             if "USE_CUSTOM_COLORS" in data:
                 CONFIG["USE_CUSTOM_COLORS"] = data["USE_CUSTOM_COLORS"]
             # 加载颜色配置（新增）
@@ -3686,6 +3757,7 @@ class AnimeCelCounter:
             "use_hash_filter": self.use_hash_filter,
             "layouts": self.layouts,
             "active_layout": self.active_layout,
+            "layout_version": 2,
             "USE_CUSTOM_COLORS": CONFIG["USE_CUSTOM_COLORS"],
             "custom_colors": get_all_colors() if CONFIG["USE_CUSTOM_COLORS"] else {}  # 新增
         }
@@ -3973,18 +4045,12 @@ class AnimeCelCounter:
             layout_to_apply = None
             if self.active_layout and self.active_layout in self.layouts:
                 layout_to_apply = self.layouts[self.active_layout]
-            else:
-                try:
-                    with open(self._get_settings_path(), "r") as f:
-                        data = json.load(f)
-                    layout_to_apply = data.get('layout', None)
-                except:
-                    pass
             if layout_to_apply:
                 if 'window_geometry' in layout_to_apply:
                     try:
                         win.geometry(layout_to_apply['window_geometry'])
-                    except:
+                        win.update_idletasks()
+                    except Exception:  # noqa: BLE001
                         pass
                 for name, geom in layout_to_apply.get('panels', {}).items():
                     if name in panels:

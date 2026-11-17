@@ -34,6 +34,13 @@
 中间是 60 秒与 25 分钟两档波形，右上角是「设置」与「关闭」。
 窗口是透明悬浮窗，可以直接叠在播放器或网页播放器上使用。
 
+设置窗口（参数 / 实时预览 / 总张数波形三块面板，右上角「布局 ▾」可切换
+经典三栏 / 参数优先 / 宽屏横排 / 上下分栏，也可以手动拖动后保存）：
+
+<p align="center">
+  <img src="assets/settings.png" alt="设置窗口" width="900">
+</p>
+
 ## 下载与运行
 
 从 [Releases](https://github.com/Re02VClife/ZSJC/releases/latest) 下载

@@ -291,8 +291,14 @@ class AnimeCelCounter:
             self.use_hash_filter = data.get("use_hash_filter", True)
             self.hash_threshold = CONFIG["HASH_THRESHOLD"]
             self.frame_buffer = deque(maxlen=CONFIG["FRAME_BUFFER_SIZE"])
-            self.layouts = data.get("layouts", {})
-            self.active_layout = data.get("active_layout", None)
+            # 布局格式版本：v1 的旧布局是面板随意叠放、窗口可能超出屏幕，
+            # 升级到 v2（预设布局）后直接忽略，避免打开设置就是一团乱。
+            if data.get("layout_version") != 2:
+                self.layouts = {}
+                self.active_layout = None
+            else:
+                self.layouts = data.get("layouts", {})
+                self.active_layout = data.get("active_layout", None)
             if "USE_CUSTOM_COLORS" in data:
                 CONFIG["USE_CUSTOM_COLORS"] = data["USE_CUSTOM_COLORS"]
             # 加载颜色配置（新增）
@@ -312,6 +318,7 @@ class AnimeCelCounter:
             "use_hash_filter": self.use_hash_filter,
             "layouts": self.layouts,
             "active_layout": self.active_layout,
+            "layout_version": 2,
             "USE_CUSTOM_COLORS": CONFIG["USE_CUSTOM_COLORS"],
             "custom_colors": get_all_colors() if CONFIG["USE_CUSTOM_COLORS"] else {}  # 新增
         }
@@ -599,18 +606,12 @@ class AnimeCelCounter:
             layout_to_apply = None
             if self.active_layout and self.active_layout in self.layouts:
                 layout_to_apply = self.layouts[self.active_layout]
-            else:
-                try:
-                    with open(self._get_settings_path(), "r") as f:
-                        data = json.load(f)
-                    layout_to_apply = data.get('layout', None)
-                except:
-                    pass
             if layout_to_apply:
                 if 'window_geometry' in layout_to_apply:
                     try:
                         win.geometry(layout_to_apply['window_geometry'])
-                    except:
+                        win.update_idletasks()
+                    except Exception:  # noqa: BLE001
                         pass
                 for name, geom in layout_to_apply.get('panels', {}).items():
                     if name in panels:
