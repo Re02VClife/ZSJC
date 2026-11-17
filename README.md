@@ -36,7 +36,8 @@
 ## 下载与运行
 
 从 [Releases](https://github.com/Re02VClife/ZSJC/releases/latest) 下载
-`张数计数器-v0.3.zip`，解压后直接运行 `张数计数器.exe`（免安装、不需要 Python）。
+`ZSJC-v0.3-win64.zip`（约 820MB），解压后直接运行 `张数计数器.exe`
+（免安装、不需要 Python）。
 
 - 包内已包含自编译的 OpenCV 4.10 CUDA 运行时（约 1.3GB），**不需要另外安装 CUDA**；
 - 需要 NVIDIA 显卡驱动 531.61 或更新版本（RTX 30 系已验证）；
