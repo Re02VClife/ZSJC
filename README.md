@@ -23,6 +23,34 @@
 检测主流程以 CPU 为主，GPU（OpenCV CUDA）只接管「角点 + 稀疏光流」这一段；
 没有 CUDA 版 OpenCV 时会自动全部走 CPU，功能不受影响。
 
+## 界面预览
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="主界面" width="900">
+</p>
+
+左侧是实时统计（实时张数 / 运行时长 / 总张数 / 总平均 / 当前滤波阶段），
+中间是 60 秒与 25 分钟两档波形，右上角是「设置」与「关闭」。
+窗口是透明悬浮窗，可以直接叠在播放器或网页播放器上使用。
+
+## 下载与运行
+
+从 [Releases](https://github.com/Re02VClife/ZSJC/releases/latest) 下载
+`张数计数器-v0.3.zip`，解压后直接运行 `张数计数器.exe`（免安装、不需要 Python）。
+
+- 包内已包含自编译的 OpenCV 4.10 CUDA 运行时（约 1.3GB），**不需要另外安装 CUDA**；
+- 需要 NVIDIA 显卡驱动 531.61 或更新版本（RTX 30 系已验证）；
+- 没有 NVIDIA 显卡或驱动过旧时会自动退回 CPU，功能完整、速度较低；
+- 首次运行如果被 SmartScreen 拦截，点「更多信息 → 仍要运行」。
+
+也可以直接用源码运行：
+
+```bash
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python main.py
+```
+
 ## 功能特性
 
 - **屏幕实时捕获**：基于 `dxcam` 高速截取屏幕，可自由调整截图区域。
@@ -279,6 +307,17 @@ GPU 与 CPU 的光流实现不同，判定结果可能有 ~2% 的差异，属于
 - GPU 自检在启动时执行一次（约 0.1~0.3 秒），失败项会打印在控制台，不会静默降级。
 
 ## 更新日志
+
+### v0.3（2026-11-17）
+
+- **打包发布**：PyInstaller 目录包，内置自编译 OpenCV 4.10 CUDA 运行时与 CUDA 11.8
+  依赖（约 1.4GB），下载解压即可运行，不需要装 Python 或 CUDA；
+- 哈希去重改为 256 位整数比较（`(a ^ b).bit_count()`），比逐元素数组比较快一个数量级；
+- `upload_pair` 复用上一帧的 `curr` 作为本帧 `prev`，省一次 0.3MB 显存上传；
+- 新增 `FLOW_POINT_REUSE_FRAMES` 开关：光流点跨帧复用可提速约 20%，
+  但实测张数偏差 7%，**默认关闭**；
+- 统计层去掉每帧 list 复制、CSV 时间比较改数值比较；
+- README 增加界面预览、下载与运行说明。
 
 ### v0.2（2026-11-15）
 

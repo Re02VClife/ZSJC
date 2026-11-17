@@ -22,10 +22,17 @@ if _cv_threads > 0:
     cv2.setNumThreads(_cv_threads)
 
 from config import CONFIG
+# 调试用：临时覆盖光流点复用帧数（0=关闭）
+_flow_reuse = os.environ.get("ZSJC_FLOW_REUSE")
+if _flow_reuse is not None:
+    CONFIG["FLOW_POINT_REUSE_FRAMES"] = int(_flow_reuse)
+_flow_points = os.environ.get("ZSJC_FLOW_POINTS")
+if _flow_points is not None:
+    CONFIG["FLOW_FEATURE_COUNT"] = int(_flow_points)
 from detection import (
     compute_diff_mask,
     basic_is_new_cel, full_is_new_cel, full_decide, is_full_still,
-    unified_motion_analysis,
+    unified_motion_analysis, hash_distance,
     GPUContext, gpu_probe,
 )
 from async_pipeline import MotionPipeline
@@ -125,6 +132,7 @@ def main():
     recent_sum_cels = 0
     recent_sum_raw = 0
     csv_rows = [("time_sec", "cels_per_sec", "raw_per_sec", "total_cels", "move_type")]
+    last_csv_ts = -1.0
 
     frame_count = 0
     t_start = time.perf_counter()
@@ -140,7 +148,7 @@ def main():
         """把一帧的最终判定计入统计（哈希去重 / 过滤分类 / 滑动窗口 / CSV）。"""
         nonlocal total_cels, total_hash, total_translation, total_flow
         nonlocal total_zoom, total_still, total_local, total_other
-        nonlocal recent_sum_cels, recent_sum_raw
+        nonlocal recent_sum_cels, recent_sum_raw, last_csv_ts
 
         ts = ctx["ts"]
         raw_new = ctx["raw_new"]
@@ -182,7 +190,8 @@ def main():
         raw_per_sec = recent_sum_raw / max(span_r, 0.001) if recent_raw else 0.0
 
         last_csv_time = csv_rows[-1][0]
-        if last_csv_time == "time_sec" or float(ts) - float(last_csv_time) >= 1.0:
+        if last_csv_ts < 0 or ts - last_csv_ts >= 1.0:
+            last_csv_ts = ts
             csv_rows.append((f"{ts:.1f}", f"{cels_per_sec:.2f}", f"{raw_per_sec:.2f}",
                              str(total_cels), move_type))
 
@@ -265,9 +274,12 @@ def main():
         # 就不是真正的上一帧，重复帧会漏判（实测异步比同步多算 5 张）。
         duplicate = False
         if hash_256 is not None:
-            buf = list(frame_buffer)
-            for h in buf[:-1]:
-                if np.sum(hash_256 != h) <= hash_threshold:
+            # 直接迭代 deque，不复制成 list；排除最后一个（上一帧）与原来 buf[:-1] 等价
+            n_buf = len(frame_buffer)
+            for i, h in enumerate(frame_buffer):
+                if i == n_buf - 1:
+                    break
+                if hash_distance(hash_256, h) <= hash_threshold:
                     duplicate = True
                     break
             frame_buffer.append(hash_256)

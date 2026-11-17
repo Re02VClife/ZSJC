@@ -96,10 +96,13 @@ _filtered_binaries = []
 for _b in a.binaries:
     # _b is a TOC entry: (dest_name, src_path, typecode)
     _fname = os.path.basename(_b[0])
-    if _fname.lower().startswith(_unneeded_cuda_prefixes):
+    _in_custom_dir = _b[0].startswith('opencv_dlls')
+    # 只过滤 opencv-python 自动收集到根目录的那批 CUDA 库；
+    # opencv_dlls/ 下是自编译 OpenCV 的运行时依赖，跨机器分发必须保留。
+    if _fname.lower().startswith(_unneeded_cuda_prefixes) and not _in_custom_dir:
         continue
     # 跳过已在 opencv_dlls/ 子目录中的同名 DLL（避免重复打包 210MB+）
-    if _fname.lower() in _custom_opencv_dlls and not _b[0].startswith('opencv_dlls'):
+    if _fname.lower() in _custom_opencv_dlls and not _in_custom_dir:
         continue
     _filtered_binaries.append(_b)
 

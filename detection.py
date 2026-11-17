@@ -56,21 +56,29 @@ def compute_hash(gray_img):
 def compute_all_hashes(gray_img):
     """
     一次缩放，同时返回 (hash_256, oped_hash)
-    hash_256 : 256 位 bool 数组（用于重复帧过滤）
+
+    hash_256 : 256 位整数（不是 bool 数组）—— 重复帧比较直接做
+               异或 + int.bit_count()，比 24 次 np.sum 数组比较快一个数量级。
     oped_hash: 64 位整数（用于 OP/ED 匹配）
     """
     resized_32 = cv2.resize(gray_img, (32, 32), interpolation=cv2.INTER_AREA)
     resized_16 = cv2.resize(resized_32, (16, 16), interpolation=cv2.INTER_AREA)
     avg_16 = resized_16.mean()
-    hash_256 = (resized_16 > avg_16).flatten()
+    packed = np.packbits((resized_16 > avg_16).flatten())
+    hash_256 = int.from_bytes(packed.tobytes(), 'little')
 
     dct = cv2.dct(np.float32(resized_32))
     dct_low = dct[:8, :8]
     avg_oped = dct_low.mean()
     bits = dct_low > avg_oped
-    packed = np.packbits(bits.flatten())
-    oped_hash = int.from_bytes(packed.tobytes(), 'little')
+    packed_oped = np.packbits(bits.flatten())
+    oped_hash = int.from_bytes(packed_oped.tobytes(), 'little')
     return hash_256, oped_hash
+
+
+def hash_distance(h1, h2):
+    """两个 256 位整数哈希的汉明距离。"""
+    return (h1 ^ h2).bit_count()
 
 
 def adaptive_threshold(frame):

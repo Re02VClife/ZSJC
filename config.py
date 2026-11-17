@@ -152,6 +152,7 @@ CONFIG = {
     "GPU_ENABLED": False,                 # 是否启用 GPU 加速（需 OpenCV CUDA 版，见 README）
     "GPU_FORCE_FALLBACK": False,         # 即使检测到 GPU 也强制使用 CPU（用于测试）
     "GPU_FLOW_MIN_PIXELS": 200000,       # 帧像素数低于此值不走 GPU 光流（实测小帧 GPU 反而慢）
+    "FLOW_POINT_REUSE_FRAMES": 0,        # 光流点复用帧数（0=关闭；>0 时每 N 帧重检角点，
 
     # ========== 番剧导入 ==========
     "KAZUMI_PARALLEL_WORKERS": 4,        # 番剧导入并行分段数（1=串行，>1=多线程分段处理）

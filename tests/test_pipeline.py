@@ -253,7 +253,8 @@ def test_frame_source_video_and_seek():
                 continue
             ts, small, _bgr, h256, oph = item
             assert small.shape == src.frame_shape
-            assert h256 is not None and h256.shape == (256,)
+            # hash_256 现在是 256 位整数（不是 bool 数组）
+            assert isinstance(h256, int) and 0 <= h256 < (1 << 256)
             assert isinstance(oph, int)
             got += 1
         assert got >= 10, f"只读到 {got} 帧"

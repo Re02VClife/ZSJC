@@ -11,7 +11,7 @@ from config import CONFIG
 from detection import (
     compute_diff_mask,
     compute_all_hashes,
-    basic_is_new_cel, full_is_new_cel,
+    basic_is_new_cel, full_is_new_cel, hash_distance,
     GPUContext, gpu_probe,
 )
 from video_source import FrameSource
@@ -317,7 +317,7 @@ class KazumiProcessor:
                 duplicate = False
                 if hash_256 is not None:
                     for h in frame_buffer:
-                        if np.sum(hash_256 != h) <= CONFIG["HASH_THRESHOLD"]:
+                        if hash_distance(hash_256, h) <= CONFIG["HASH_THRESHOLD"]:
                             duplicate = True
                             break
                     frame_buffer.append(hash_256)
@@ -867,7 +867,7 @@ class KazumiProcessor:
             duplicate = False
             if hash_256 is not None:
                 for h in frame_buffer:
-                    if np.sum(hash_256 != h) <= CONFIG["HASH_THRESHOLD"]:
+                    if hash_distance(hash_256, h) <= CONFIG["HASH_THRESHOLD"]:
                         duplicate = True
                         break
                 frame_buffer.append(hash_256)

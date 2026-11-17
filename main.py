@@ -21,7 +21,7 @@ import tkinter.messagebox as messagebox
 # 添加自定义模块导入
 from config import CONFIG, color_manager, get_settings_path, CONFIG_DEFAULT
 from detection import (compute_all_hashes, is_raw_change, basic_is_new_cel,
-                      full_is_new_cel, compute_diff_mask,
+                      full_is_new_cel, compute_diff_mask, hash_distance,
                       GPUContext, gpu_probe)
 from preview import PreviewManager
 from video_source import FrameSource, FFmpegNvDecSource
@@ -1325,7 +1325,7 @@ class AnimeCelCounter:
                     with self.lock:
                         buf = list(self.frame_buffer)
                         for h in buf[:-1]:
-                            if np.sum(hash_256 != h) <= self.hash_threshold:
+                            if hash_distance(hash_256, h) <= self.hash_threshold:
                                 duplicate = True
                                 break
                         self.frame_buffer.append(hash_256)

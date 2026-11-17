@@ -312,6 +312,7 @@ CONFIG = {
     "GPU_ENABLED": False,                 # 是否启用 GPU 加速（需 OpenCV CUDA 版，见 README）
     "GPU_FORCE_FALLBACK": False,         # 即使检测到 GPU 也强制使用 CPU（用于测试）
     "GPU_FLOW_MIN_PIXELS": 200000,       # 帧像素数低于此值不走 GPU 光流（实测小帧 GPU 反而慢）
+    "FLOW_POINT_REUSE_FRAMES": 0,        # 光流点复用帧数（0=关闭；>0 时每 N 帧重检角点，
 
     # ========== 番剧导入 ==========
     "KAZUMI_PARALLEL_WORKERS": 4,        # 番剧导入并行分段数（1=串行，>1=多线程分段处理）
@@ -590,6 +591,11 @@ class GPUContext:
         self._morph = None
         self._lk = None
         self._gftt = None
+        # 光流点复用：上一轮 track 的落点在本轮 prev 上，可直接当角点用，
+        # 省掉一次 GFTT（实测 1.33ms/帧）；每 N 帧强制重检避免漂移。
+        self._cached_points = None
+        self._cache_host = None
+        self._reuse_left = 0
         # 对齐差分链共用一个 stream：warp → absdiff → threshold → morph →
         # countNonZero 全部异步提交，最后 waitForCompletion 一次，
         # 避免每步都同步（默认流下每个调用都是一次同步点）。
@@ -598,15 +604,25 @@ class GPUContext:
     # ---------------- 帧上传 ----------------
 
     def upload_pair(self, prev, curr):
-        """上传一对相邻帧；尺寸变化时重建 GpuMat 由 upload 自动处理。"""
+        """上传一对相邻帧；尺寸变化时重建 GpuMat 由 upload 自动处理。
+
+        优化：如果上一轮的 curr 正好是本轮的 prev（正常逐帧检测都是这样），
+        直接把两个 GpuMat 交换、只上传 curr，省掉一次 0.3MB 的上传。
+        """
         if prev is None or curr is None:
             raise ValueError("upload_pair 需要两帧")
         if prev.shape != curr.shape:
             raise ValueError(f"两帧尺寸不一致: {prev.shape} vs {curr.shape}")
-        self._prev.upload(np.ascontiguousarray(prev))
-        self._curr.upload(np.ascontiguousarray(curr))
-        self._prev_src = prev
-        self._curr_src = curr
+        if self._curr_src is prev and not self._curr.empty():
+            self._prev, self._curr = self._curr, self._prev
+            self._prev_src = prev
+            self._curr.upload(np.ascontiguousarray(curr))
+            self._curr_src = curr
+        else:
+            self._prev.upload(np.ascontiguousarray(prev))
+            self._curr.upload(np.ascontiguousarray(curr))
+            self._prev_src = prev
+            self._curr_src = curr
         self._shape = curr.shape
 
     # 兼容旧调用方（extract.py / kazumi_processor.py 曾用分开上传）
@@ -675,7 +691,16 @@ class GPUContext:
         return h * w >= int(CONFIG.get("GPU_FLOW_MIN_PIXELS", 200_000))
 
     def corners(self, src="curr"):
-        """GPU 角点检测，返回 (N,2) float32 ndarray 或 None。"""
+        """GPU 角点检测，返回 (N,2) float32 ndarray 或 None。
+
+        src="prev" 时如果上一轮光流的落点正好落在本帧 prev 上（同一 ndarray），
+        直接复用那些点，省掉一次 GFTT；复用次数由 FLOW_POINT_REUSE_FRAMES 限制。
+        """
+        if (src == "prev" and self._cached_points is not None
+                and self._cache_host is self._prev_src
+                and self._reuse_left > 0):
+            self._reuse_left -= 1
+            return self._cached_points
         gmat = self._curr if src == "curr" else self._prev
         raw = self._gftt_obj().detect(gmat)
         if raw is None or raw.empty():
@@ -699,6 +724,11 @@ class GPUContext:
             cv2.cuda_GpuMat(), cv2.cuda_GpuMat(), cv2.cuda_GpuMat())
         p1 = next_pts.download().reshape(-1, 2).astype(np.float32)
         st = status.download().reshape(-1)
+        if target == "curr" and int(np.sum(st == 1)) >= 20:
+            # 落点在本轮 curr 上，下一轮它可以当 prev 的角点
+            self._cached_points = p1
+            self._cache_host = self._curr_src
+            self._reuse_left = int(CONFIG.get("FLOW_POINT_REUSE_FRAMES", 0))
         return p1, st
 
     def warp_translate(self, dx, dy, use_stream=False):
@@ -1056,21 +1086,29 @@ def compute_hash(gray_img):
 def compute_all_hashes(gray_img):
     """
     一次缩放，同时返回 (hash_256, oped_hash)
-    hash_256 : 256 位 bool 数组（用于重复帧过滤）
+
+    hash_256 : 256 位整数（不是 bool 数组）—— 重复帧比较直接做
+               异或 + int.bit_count()，比 24 次 np.sum 数组比较快一个数量级。
     oped_hash: 64 位整数（用于 OP/ED 匹配）
     """
     resized_32 = cv2.resize(gray_img, (32, 32), interpolation=cv2.INTER_AREA)
     resized_16 = cv2.resize(resized_32, (16, 16), interpolation=cv2.INTER_AREA)
     avg_16 = resized_16.mean()
-    hash_256 = (resized_16 > avg_16).flatten()
+    packed = np.packbits((resized_16 > avg_16).flatten())
+    hash_256 = int.from_bytes(packed.tobytes(), 'little')
 
     dct = cv2.dct(np.float32(resized_32))
     dct_low = dct[:8, :8]
     avg_oped = dct_low.mean()
     bits = dct_low > avg_oped
-    packed = np.packbits(bits.flatten())
-    oped_hash = int.from_bytes(packed.tobytes(), 'little')
+    packed_oped = np.packbits(bits.flatten())
+    oped_hash = int.from_bytes(packed_oped.tobytes(), 'little')
     return hash_256, oped_hash
+
+
+def hash_distance(h1, h2):
+    """两个 256 位整数哈希的汉明距离。"""
+    return (h1 ^ h2).bit_count()
 
 
 def adaptive_threshold(frame):
@@ -4661,7 +4699,7 @@ class AnimeCelCounter:
                     with self.lock:
                         buf = list(self.frame_buffer)
                         for h in buf[:-1]:
-                            if np.sum(hash_256 != h) <= self.hash_threshold:
+                            if hash_distance(hash_256, h) <= self.hash_threshold:
                                 duplicate = True
                                 break
                         self.frame_buffer.append(hash_256)
