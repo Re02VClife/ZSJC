@@ -22,6 +22,7 @@ GUI 实时截屏统计，离线可批量提取。详细说明见 `README.md`，�
 | `main.py` | 主程序状态机 + 捕获循环 |
 | `ui.py` `widgets.py` `preview.py` | 设置窗口、可拖面板、预览 |
 | `extract.py` `extract_parallel.py` `batch_extract.py` | 离线提取与批量 |
+| `kazumi_processor.py` | kazumi 番剧缓存导入（GUI / CLI 后台模式） |
 | `build.py` → `ZhangShuJianCe.py` | 合并成单文件，**生成物，不要手改** |
 
 ## 必须遵守的约定
