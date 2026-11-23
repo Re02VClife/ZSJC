@@ -10,7 +10,7 @@ import opencv_env  # 注册 OpenCV/CUDA DLL 搜索路径（必须先于 import c
 import cv2
 cv2.setNumThreads(6)          # 调用cpu线程数
 cv2.ocl.setUseOpenCL(False)   # GPU 光流由 OpenCV CUDA 管理，关闭 OpenCL 避免抢占
-import time, threading, json, copy, subprocess
+import time, threading, json, copy, subprocess, queue
 from collections import deque
 import csv
 import cv2
@@ -215,6 +215,11 @@ class AnimeCelCounter:
         self.root.attributes("-transparentcolor", TRANSPARENT)
         self.root.configure(bg=TRANSPARENT)
         self.root.overrideredirect(True)
+        # Alt+F4 / 系统关闭也走 _on_close，避免绕过线程清理直接 destroy
+        try:
+            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        except Exception:
+            pass
 
         # 构建主界面
         ui_elems = build_main_ui(self.root, self)
@@ -434,19 +439,111 @@ class AnimeCelCounter:
             if idx >= 1:
                 _hide_sub()
 
+    def _kazumi_default_dirs(self):
+        """默认缓存目录 + 设置里保存的目录（去重、只保留存在的）"""
+        cands = [os.path.join(os.environ.get("APPDATA", ""),
+                              "com.example", "kazumi", "downloads")]
+        cands.extend(CONFIG.get("KAZUMI_SEARCH_PATHS") or [])
+        seen, out = set(), []
+        for p in cands:
+            if not p:
+                continue
+            try:
+                p = os.path.normpath(os.path.expanduser(str(p)))
+            except Exception:
+                continue
+            if p in seen or not os.path.isdir(p):
+                continue
+            seen.add(p)
+            out.append(p)
+        return out
+
+    def _choose_kazumi_dir(self):
+        """选番剧缓存目录：有保存的路径就弹选择窗，否则直接开浏览框"""
+        from tkinter import filedialog
+
+        paths = self._kazumi_default_dirs()
+        last = CONFIG.get("KAZUMI_LAST_DIR") or ""
+        if not paths:
+            return filedialog.askdirectory(
+                title="选择番剧缓存目录（支持 seg_*.ts / *.mp4）",
+                initialdir=last if os.path.isdir(last) else None)
+
+        bg = color_manager.get_color('bg')
+        accent = color_manager.get_color('accent')
+        btn_bg = color_manager.get_color('btn_bg')
+
+        win = tk.Toplevel(self.root)
+        win.title("选择番剧缓存目录")
+        win.geometry("620x330")
+        win.configure(bg=bg)
+        win.transient(self.root)
+        win.attributes("-topmost", True)
+        picked = {"dir": None}
+
+        tk.Label(win, text="选择要检测的缓存目录", fg=accent, bg=bg,
+                 font=("Arial", 10, "bold")).pack(pady=(12, 4))
+
+        box = tk.Frame(win, bg=bg)
+        box.pack(fill="both", expand=True, padx=16, pady=4)
+        lb = tk.Listbox(box, bg=btn_bg, fg=accent, selectbackground=accent,
+                        selectforeground=bg, font=("Consolas", 9),
+                        highlightthickness=0, bd=0)
+        sb = tk.Scrollbar(box, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=sb.set)
+        lb.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        for p in paths:
+            lb.insert("end", p)
+        lb.selection_set(0)
+        lb.see(0)
+
+        def _ok(_evt=None):
+            sel = lb.curselection()
+            if sel:
+                picked["dir"] = paths[sel[0]]
+            win.destroy()
+
+        def _browse():
+            d = filedialog.askdirectory(
+                title="选择番剧缓存目录（支持 seg_*.ts / *.mp4）",
+                initialdir=paths[0] if paths else None)
+            if d:
+                picked["dir"] = d
+                win.destroy()
+
+        row = tk.Frame(win, bg=bg)
+        row.pack(pady=10)
+        tk.Button(row, text="开始检测", bg=btn_bg, fg=accent, font=("Arial", 9),
+                  command=_ok).pack(side="left", padx=6)
+        tk.Button(row, text="浏览其他目录…", bg=btn_bg, fg=accent, font=("Arial", 9),
+                  command=_browse).pack(side="left", padx=6)
+        tk.Button(row, text="取消", bg=btn_bg, fg=accent, font=("Arial", 9),
+                  command=win.destroy).pack(side="left", padx=6)
+        lb.bind("<Double-Button-1>", _ok)
+
+        win.wait_window()
+        return picked["dir"]
+
     def _import_anime_cache(self):
         """导入番剧缓存目录（kazumi TS 分片）进行离线检测"""
-        from tkinter import filedialog, simpledialog
         from kazumi_processor import KazumiProcessor, find_video_files
 
-        # 默认路径
-        default_dir = os.path.join(os.environ.get("APPDATA", ""),
-                                   "com.example", "kazumi", "downloads")
-        directory = filedialog.askdirectory(
-            title="选择番剧缓存目录（支持 seg_*.ts / *.mp4）",
-            initialdir=default_dir if os.path.isdir(default_dir) else None)
+        # 同一时间只允许一个任务：旧任务没结束就不再开新窗口（避免叠一屏进度窗）
+        cur = getattr(self, '_kazumi_processor', None)
+        if cur is not None and cur.is_busy:
+            win = getattr(self, '_kazumi_prog_win', None)
+            if win is not None and win.winfo_exists():
+                win.deiconify()
+                win.lift()
+            messagebox.showinfo("正在处理",
+                                "上一个番剧检测还没跑完。\n\n请等它结束，或在进度窗里点「取消」。")
+            return
+
+        directory = self._choose_kazumi_dir()
         if not directory:
             return
+        CONFIG["KAZUMI_LAST_DIR"] = directory
 
         # 扫描视频文件
         video_files, file_type = find_video_files(directory)
@@ -460,17 +557,28 @@ class AnimeCelCounter:
             "确认处理",
             f"找到 {len(video_files)} 个{file_label}文件\n\n"
             f"将离线检测作画张数（scale={CONFIG['SCALE_FACTOR']}）\n"
-            f"期间界面可能短暂卡顿\n\n是否继续？")
+            f"开始后可以点「后台继续」把窗口收起来，不影响主界面使用\n\n是否继续？")
         if not ok:
             return
+
+        # 离线检测期间暂停实时截屏：dxcam 抓屏 + 实时检测会和 FFmpeg 抢 CPU
+        capture_paused = {"v": False}
+        if CONFIG.get("KAZUMI_PAUSE_CAPTURE", True) and getattr(self, 'is_running', False):
+            self._set_capture_running(False)
+            capture_paused["v"] = True
+
+        def _restore_capture():
+            if capture_paused["v"]:
+                capture_paused["v"] = False
+                self._set_capture_running(True)
 
         # 进度窗口
         prog_win = tk.Toplevel(self.root)
         prog_win.title("番剧缓存处理")
-        prog_win.geometry("500x220")
+        prog_win.geometry("500x240")
         prog_win.configure(bg=color_manager.get_color('bg'))
         prog_win.transient(self.root)
-        prog_win.grab_set()
+        # 不再 grab_set：锁住主界面会让"后台运行"失去意义
         prog_win.attributes("-topmost", True)
 
         accent = color_manager.get_color('accent')
@@ -494,42 +602,104 @@ class AnimeCelCounter:
         pct_label = tk.Label(prog_win, text="0%", fg=accent, bg=bg, font=("Arial", 9))
         pct_label.pack()
 
-        cancel_btn = tk.Button(prog_win, text="取消", bg=btn_bg, fg=accent,
+        btn_row = tk.Frame(prog_win, bg=bg)
+        btn_row.pack(pady=8)
+
+        cancel_btn = tk.Button(btn_row, text="取消", bg=btn_bg, fg=accent,
                                font=("Arial", 9))
-        cancel_btn.pack(pady=10)
+        cancel_btn.pack(side="left", padx=5)
+        back_btn = tk.Button(btn_row, text="后台继续", bg=btn_bg, fg=accent,
+                             font=("Arial", 9), command=lambda: prog_win.withdraw())
+        back_btn.pack(side="left", padx=5)
 
         # 处理器（线程安全：通过 root.after 投递 UI 更新）
         processor = KazumiProcessor()
+        self._kazumi_processor = processor
+        self._kazumi_prog_win = prog_win
+        state = {"done": False}
 
-        def on_progress(phase, percent, msg):
-            """回调：工作线程调用 → root.after 投递到主线程"""
-            def _update():
+        def _update_ui(phase, percent, msg):
+            try:
                 if not prog_win.winfo_exists():
                     return
-                try:
-                    phase_label.config(text=f"[{phase}] {msg}")
-                    bar_canvas.coords(bar_rect, 0, 0, int(400 * percent / 100), 24)
-                    pct_label.config(text=f"{percent:.0f}%")
-                    if phase == "完成":
-                        cancel_btn.config(text="关闭", command=lambda: on_done(None))
-                except Exception:
-                    pass
-            self.root.after(1, _update)
+                phase_label.config(text=f"[{phase}] {msg}")
+                bar_canvas.coords(bar_rect, 0, 0, int(400 * percent / 100), 24)
+                pct_label.config(text=f"{percent:.0f}%")
+                if phase in ("完成", "错误"):
+                    state["done"] = True
+                    cancel_btn.config(text="关闭", command=_close_prog)
+                    _restore_capture()
+            except Exception:
+                pass
+
+        def on_progress(phase, percent, msg):
+            """回调：工作线程调用。
+
+            **不能**直接调 self.root.after()：Tkinter 不是线程安全的，
+            后台线程碰 Tcl 解释器会让 tcl86t.dll 抛 0x80000003 直接崩掉进程。
+            这里只往队列塞数据，主线程定期泵出来更新 UI。
+            """
+            try:
+                ui_queue.put_nowait((phase, percent, msg))
+            except Exception:
+                pass
+
+        ui_queue = queue.Queue()
+
+        def _pump_ui():
+            try:
+                while True:
+                    item = ui_queue.get_nowait()
+                    _update_ui(*item)
+            except queue.Empty:
+                pass
+            except Exception:
+                pass
+            try:
+                if prog_win.winfo_exists():
+                    self.root.after(50, _pump_ui)
+            except Exception:
+                pass
+
+        self.root.after(50, _pump_ui)
+
+        def _close_prog():
+            self._kazumi_prog_win = None
+            if prog_win.winfo_exists():
+                prog_win.destroy()
 
         def on_done(report):
             """完成：关闭进度窗，显示报告"""
-            if prog_win.winfo_exists():
-                prog_win.destroy()
+            _restore_capture()
+            _close_prog()
             if report:
                 _show_kazumi_report(self, report)
 
-        cancel_btn.config(command=processor.cancel)
+        def on_cancel_click():
+            if state["done"]:
+                _close_prog()
+                return
+            processor.cancel()
+            cancel_btn.config(text="关闭", command=_close_prog)
+            state["done"] = True
+            _restore_capture()
+
+        def on_window_close():
+            """点窗口右上角 ×：确认后转到后台继续"""
+            if state["done"]:
+                _close_prog()
+                return
+            if messagebox.askyesno(
+                    "后台运行",
+                    "检测还在进行。\n\n是否转到后台继续？\n（完成后会弹检测报告，期间主界面可以正常使用）",
+                    parent=prog_win):
+                prog_win.withdraw()
+
+        cancel_btn.config(command=on_cancel_click)
+        prog_win.protocol("WM_DELETE_WINDOW", on_window_close)
         processor.cb_progress = on_progress
         processor.cb_done = on_done
         processor.process(directory, scale=0.5)
-
-        # 防止被 GC
-        self._kazumi_processor = processor
 
     def _import_video(self):
         from tkinter import filedialog
@@ -698,6 +868,13 @@ class AnimeCelCounter:
             "OPED_EXIT_CONSEC": "OPED退出连续帧",
             "OPED_MIN_DURATION": "OPED最短长度(s)",
             "OPED_SELF_EXCLUDE_SEC": "OPED自排除窗口(s)",
+            "OPED_SEARCH_WINDOW_SEC": "OPED回溯窗口(s)",
+            "OPED_MATCH_MIN_DENSITY": "OPED匹配密度",
+            "OPED_BRIGHT_TOL": "OPED亮度容差",
+            "OPED_MANUAL_HEAD_SEC": "每集扣头(s)",
+            "OPED_MANUAL_TAIL_SEC": "每集扣尾(s)",
+            "KAZUMI_PARALLEL_WORKERS": "番剧并行分段",
+            "KAZUMI_PAUSE_CAPTURE": "离线时暂停实时检测",
         }
 
         groups = [
@@ -722,7 +899,10 @@ class AnimeCelCounter:
             ("OP/ED哈希匹配", ["OPED_HASH_ENABLED", "OPED_HASH_SIZE", "OPED_HASH_MAX_DIST",
                                "OPED_HASH_WIN_RATIO", "OPED_ENTER_HAMMING", "OPED_EXIT_HAMMING",
                                "OPED_ENTER_CONSEC", "OPED_EXIT_CONSEC", "OPED_MIN_DURATION",
-                               "OPED_SELF_EXCLUDE_SEC"]),
+                               "OPED_SELF_EXCLUDE_SEC", "OPED_SEARCH_WINDOW_SEC",
+                               "OPED_MATCH_MIN_DENSITY", "OPED_BRIGHT_TOL",
+                               "OPED_MANUAL_HEAD_SEC", "OPED_MANUAL_TAIL_SEC"]),
+            ("番剧导入", ["KAZUMI_PARALLEL_WORKERS", "KAZUMI_PAUSE_CAPTURE"]),
         ]
 
         self.crop_ratio_label_var = tk.StringVar()
@@ -793,6 +973,46 @@ class AnimeCelCounter:
                     entries[key] = var
                 c_row += 1
 
+        # 番剧缓存路径（可保存多个，「导入番剧」时直接选）
+        row_left = left_frame.grid_size()[1]
+        tk.Label(left_frame, text="番剧缓存路径", font=("Arial", 10, "bold"),
+                 fg=accent, bg=bg).grid(row=row_left, column=0, columnspan=2, sticky="w", pady=(10, 2))
+        row_left += 1
+        kazumi_frame = tk.Frame(left_frame, bg=bg)
+        kazumi_frame.grid(row=row_left, column=0, columnspan=2, sticky="we", padx=5)
+        row_left += 1
+        kazumi_list = tk.Listbox(kazumi_frame, height=4, bg=btn_bg, fg=accent,
+                                 selectbackground=accent, selectforeground=bg,
+                                 font=("Consolas", 8), bd=0, highlightthickness=0)
+        kazumi_list.pack(fill="x")
+        for _p in (CONFIG.get("KAZUMI_SEARCH_PATHS") or []):
+            kazumi_list.insert("end", _p)
+
+        def _kazumi_sync():
+            CONFIG["KAZUMI_SEARCH_PATHS"] = list(kazumi_list.get(0, "end"))
+
+        def _kazumi_add():
+            from tkinter import filedialog
+            d = filedialog.askdirectory(title="添加番剧缓存目录",
+                                        initialdir=CONFIG.get("KAZUMI_LAST_DIR") or None)
+            if d:
+                if d not in list(kazumi_list.get(0, "end")):
+                    kazumi_list.insert("end", d)
+                _kazumi_sync()
+
+        def _kazumi_remove():
+            sel = kazumi_list.curselection()
+            if sel:
+                kazumi_list.delete(sel[0])
+                _kazumi_sync()
+
+        kazumi_btns = tk.Frame(kazumi_frame, bg=bg)
+        kazumi_btns.pack(fill="x", pady=2)
+        tk.Button(kazumi_btns, text="添加目录", bg=btn_bg, fg=accent, font=("Arial", 8),
+                  command=_kazumi_add).pack(side="left", padx=(0, 5))
+        tk.Button(kazumi_btns, text="删除选中", bg=btn_bg, fg=accent, font=("Arial", 8),
+                  command=_kazumi_remove).pack(side="left")
+
         # 功能开关
         row_left = left_frame.grid_size()[1]
         tk.Label(left_frame, text="功能开关", font=("Arial", 10, "bold"),
@@ -804,6 +1024,16 @@ class AnimeCelCounter:
         row_left += 1
         hash_var = tk.BooleanVar(value=self.use_hash_filter)
         tk.Checkbutton(left_frame, text="启用重复帧过滤", variable=hash_var,
+                       fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w", padx=5)
+        row_left += 1
+        # 离线检测（导入番剧）时是否停掉实时抓屏
+        pause_cap_var = tk.BooleanVar(value=bool(CONFIG.get("KAZUMI_PAUSE_CAPTURE", True)))
+
+        def _toggle_pause_capture():
+            CONFIG["KAZUMI_PAUSE_CAPTURE"] = bool(pause_cap_var.get())
+
+        tk.Checkbutton(left_frame, text="离线检测时暂停实时抓屏", variable=pause_cap_var,
+                       command=_toggle_pause_capture,
                        fg=accent, bg=bg, selectcolor=btn_bg).grid(row=row_left, column=0, columnspan=2, sticky="w", padx=5)
         row_left += 1
 
@@ -1634,6 +1864,46 @@ class AnimeCelCounter:
             self.use_gpu = False
         self._save_all_settings()
 
+    def _set_capture_running(self, running):
+        """给捕获链路让路/恢复：停掉 dxcam 抓屏线程，而不只是让循环空转。
+
+        离线检测（导入番剧）期间用它把实时检测彻底关掉：
+        只 clear `_run_event` 时，循环虽然不再处理帧，但 dxcam 自己的
+        抓屏线程还在跑（target_fps=0 时几乎满速），照样占一个核。
+        """
+        try:
+            if running:
+                self.is_running = True
+                self.last_loop_time = time.time()
+                self._last_capture_time = time.time()
+                if not self.video_mode:
+                    cam = getattr(self, 'camera', None)
+                    if cam is not None:
+                        try:
+                            cam.start(target_fps=0, video_mode=False)
+                        except Exception:
+                            # 起不来就重建一个
+                            try:
+                                import dxcam as _dx
+                                self.camera = _dx.create(output_color="BGR")
+                                self.camera.start(target_fps=0, video_mode=False)
+                            except Exception:
+                                pass
+                self._run_event.set()
+            else:
+                self.is_running = False
+                self._run_event.clear()
+                if not self.video_mode:
+                    cam = getattr(self, 'camera', None)
+                    if cam is not None:
+                        try:
+                            cam.stop()
+                        except Exception:
+                            pass
+            self._draw_buttons()
+        except Exception:
+            pass
+
     def pause(self):
         self.is_running = not self.is_running
         if self.is_running:
@@ -1746,9 +2016,22 @@ class AnimeCelCounter:
         self._save_profile()
         self._stop_event.set()
         self._run_event.set()
-        self.preview_manager.stop()
-        if self.frame_source:
-            self.frame_source.close()
+        try:
+            self.preview_manager.stop()
+        except Exception:
+            pass
+        try:
+            if self.frame_source:
+                self.frame_source.close()
+        except Exception:
+            pass
+        # 停掉 dxcam 的抓屏线程，否则解释器退出时它还在碰 Tcl/CUDA
+        try:
+            cam = getattr(self, 'camera', None)
+            if cam is not None:
+                cam.stop()
+        except Exception:
+            pass
         if self.gpu_ctx is not None:
             try:
                 self.gpu_ctx.release()
@@ -1758,7 +2041,13 @@ class AnimeCelCounter:
             self.capture_thread.join(timeout=2.0)
         if hasattr(self.preview_manager, 'thread') and self.preview_manager.thread and self.preview_manager.thread.is_alive():
             self.preview_manager.thread.join(timeout=1.0)
-        self.root.destroy()
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        # Tcl 在解释器退出时的 Finalize 会触发 0x80000003（tcl86t.dll）崩溃弹窗，
+        # 配置已保存，这里直接硬退出，跳过 Python 的清理流程
+        os._exit(0)
 
     def get_status(self, v):
         if self.full_filter_active:
@@ -2077,17 +2366,96 @@ def _show_kazumi_report(counter, report):
     """显示番剧缓存处理结果报告窗口"""
     import tkinter as tk
     import tkinter.ttk as ttk
-
-    win = tk.Toplevel(counter.root)
-    win.title("番剧检测报告")
-    win.geometry("600x500")
-    win.configure(bg=color_manager.get_color('bg'))
-    win.transient(counter.root)
-    win.grab_set()
+    import json as _json
 
     accent = color_manager.get_color('accent')
     bg = color_manager.get_color('bg')
     btn_bg = color_manager.get_color('btn_bg')
+
+    win = tk.Toplevel(counter.root)
+    win.title("番剧检测报告")
+    win.geometry("720x720")
+    win.minsize(660, 560)
+    win.configure(bg=bg)
+    # 不 transient：独立窗口，可以单独最小化 / 在任务栏切换
+    win.lift()
+    win.focus_force()
+
+    # 主窗口是 -topmost 悬浮窗，会把报告压在下面（表现为「点不到、不能最小化」）
+    try:
+        counter.root.attributes("-topmost", False)
+    except Exception:
+        pass
+
+    def _restore_main_topmost():
+        try:
+            counter.root.attributes("-topmost", True)
+        except Exception:
+            pass
+
+    def _close():
+        _restore_main_topmost()
+        win.destroy()
+
+    win.protocol("WM_DELETE_WINDOW", _close)
+
+    # ── 自动保存一份 JSON（不用再点按钮）──
+    def _report_dir():
+        try:
+            from config import get_project_dir
+            base = get_project_dir()
+        except Exception:
+            base = os.path.dirname(os.path.abspath(__file__))
+        d = os.path.join(base, "reports")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            return base
+        return d
+
+    def _dump(path):
+        clean = {}
+        for k, v in report.items():
+            clean[k] = str(v) if hasattr(v, 'parts') else v
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(clean, f, indent=2, ensure_ascii=False)
+
+    auto_path = ""
+    try:
+        title = os.path.basename(report.get("directory", "")) or "report"
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        auto_path = os.path.join(_report_dir(), f"{title}_{stamp}.json")
+        _dump(auto_path)
+    except Exception:
+        auto_path = ""
+
+    # ── 底部按钮先放，保证不会被内容挤出窗口 ──
+    btn_frame = tk.Frame(win, bg=bg)
+    btn_frame.pack(side="bottom", fill="x", padx=16, pady=(4, 10))
+
+    def save_report():
+        from tkinter import filedialog, messagebox
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json", filetypes=[("JSON", "*.json")],
+            title="保存检测报告",
+            initialfile=os.path.basename(auto_path) if auto_path else None)
+        if path:
+            try:
+                _dump(path)
+                messagebox.showinfo("已保存", f"报告已保存到：\n{path}", parent=win)
+            except Exception as e:  # noqa: BLE001
+                messagebox.showerror("保存失败", str(e), parent=win)
+
+    tk.Button(btn_frame, text="保存报告 (JSON)", command=save_report,
+              bg=btn_bg, fg=accent).pack(side="left", padx=5)
+    if auto_path:
+        tk.Label(btn_frame, text=f"已自动保存：{os.path.basename(auto_path)}",
+                 fg=color_manager.get_color('secondary'), bg=bg,
+                 font=("Arial", 8)).pack(side="left", padx=8)
+    tk.Button(btn_frame, text="最小化", command=win.iconify,
+              bg=btn_bg, fg=accent).pack(side="right", padx=5)
+    tk.Button(btn_frame, text="关闭", command=_close,
+              bg=btn_bg, fg=accent).pack(side="right", padx=5)
 
     # 标题
     title = os.path.basename(report.get("directory", ""))
@@ -2096,21 +2464,39 @@ def _show_kazumi_report(counter, report):
 
     # 基本信息
     info_frame = tk.Frame(win, bg=bg)
-    info_frame.pack(fill="x", padx=20, pady=5)
+    info_frame.pack(fill="x", padx=20, pady=2)
 
     oped_cels = report.get('oped_deducted_cels', 0)
     oped_time = report.get('oped_deducted_time', 0)
     oped_count = report.get('oped_intervals', 0)
+    dur_sec = report.get('duration_sec', 0)
+    dur_min = report.get('duration_min', dur_sec / 60.0)
+    det_sec = report.get('detected_sec', dur_sec)
+    det_min = report.get('detected_min', det_sec / 60.0)
+    src = report.get('duration_source', '')
+    src_label = {'per-file': "逐文件探测", 'estimate': "按大小估算（不准）"}.get(src, src or "未知")
+    dur_ok = report.get('duration_files_ok', 0)
+    dur_fail = report.get('duration_files_failed', 0)
+    net_sec = report.get('net_duration_sec', dur_sec - oped_time)
     info_items = [
         ("分片数", f"{report.get('segments', 0)}"),
-        ("视频时长", f"{report.get('duration_min', 0):.1f} 分钟 ({report.get('duration_sec', 0):.0f} 秒)"),
+        ("视频时长", f"{dur_min:.1f} 分钟 ({dur_sec:.0f} 秒)"),
+        ("实际检测", f"{det_min:.1f} 分钟 ({det_sec:.0f} 秒)"),
+        ("正片时长", f"{net_sec/60:.1f} 分钟 (扣 OP/ED {oped_time:.0f}s)"),
         ("处理帧数", f"{report.get('total_frames', 0)}"),
-        ("帧率", f"{report.get('video_fps', 0):.1f} fps"),
+        ("帧率", f"{report.get('video_fps', 0):.3f} fps"),
         ("处理耗时", f"{report.get('elapsed_sec', 0):.1f} 秒 ({report.get('speedup', 0):.1f}x 实时)"),
         ("缩放比例", f"{report.get('scale', 0)}"),
+        ("时长来源", f"{src_label}" + (f"（{dur_ok} 成功 / {dur_fail} 失败）" if dur_fail else f"（{dur_ok} 个文件）")),
         ("OP/ED段数", f"{oped_count}" if oped_count > 0 else "无"),
         ("OP/ED扣除", f"{oped_cels} 张 / {oped_time:.1f}s" if oped_cels > 0 else "—"),
     ]
+    man_cels = report.get('manual_deducted_cels', 0)
+    man_time = report.get('manual_deducted_time', 0)
+    if man_time > 0:
+        info_items.append(("固定扣除", f"{man_cels} 张 / {man_time:.0f}s "
+                                       f"(每集头{report.get('manual_head_sec', 0):.0f}s "
+                                       f"尾{report.get('manual_tail_sec', 0):.0f}s)"))
 
     for i, (label, value) in enumerate(info_items):
         tk.Label(info_frame, text=f"{label}:", fg=accent, bg=bg,
@@ -2118,9 +2504,27 @@ def _show_kazumi_report(counter, report):
         tk.Label(info_frame, text=value, fg=accent, bg=bg,
                  font=("Arial", 9)).grid(row=i, column=1, sticky="w", padx=10)
 
+    # 检测覆盖不足时明确告警
+    if dur_sec > 0 and det_sec < dur_sec * 0.98 - 5:
+        tk.Label(win,
+                 text=f"⚠ 只解码到 {det_min:.1f} / {dur_min:.1f} 分钟，数据不完整",
+                 fg="#FF5C8A", bg=bg, font=("Arial", 9, "bold")).pack(pady=(2, 0))
+    elif src == 'estimate':
+        tk.Label(win,
+                 text="⚠ 视频时长是按文件大小估算的，仅供参考",
+                 fg="#FF5C8A", bg=bg, font=("Arial", 9, "bold")).pack(pady=(2, 0))
+
+    bad = report.get("incomplete_files") or []
+    if bad:
+        shown = "、".join(str(b) for b in bad[:6]) + ("…" if len(bad) > 6 else "")
+        tk.Label(win,
+                 text=f"⚠ {len(bad)} 个文件视频流短于容器，可能没下完整：{shown}",
+                 fg="#FFC857", bg=bg, font=("Arial", 9, "bold"),
+                 wraplength=640, justify="left").pack(pady=(2, 0))
+
     # 核心数据
     core_frame = tk.Frame(win, bg=bg)
-    core_frame.pack(fill="x", padx=20, pady=10)
+    core_frame.pack(fill="x", padx=20, pady=8)
 
     total_cels = report.get("total_cels", 0)
     net_cels = report.get("net_cels", total_cels)
@@ -2129,31 +2533,35 @@ def _show_kazumi_report(counter, report):
     oped_cels = report.get("oped_deducted_cels", 0)
 
     stat_items = [
-        (f"总张数\n(过滤后)", net_cels, 28),
-        (f"平均张/秒", f"{avg_cels:.1f}", 24),
-        (f"总张数\n(过滤前)", total_raw, 20),
+        (f"总张数\n(过滤后)", net_cels, 26),
+        (f"平均张/秒", f"{avg_cels:.1f}", 22),
+        (f"总张数\n(过滤前)", total_raw, 18),
     ]
     if oped_cels > 0:
-        stat_items.insert(1, (f"OP/ED扣除", f"-{oped_cels}", 20))
+        stat_items.insert(1, (f"OP/ED扣除", f"-{oped_cels}", 18))
 
     for text, value, size in stat_items:
         frm = tk.Frame(core_frame, bg=btn_bg, bd=1, relief="solid")
-        frm.pack(side="left", expand=True, fill="both", padx=5)
+        frm.pack(side="left", expand=True, fill="both", padx=4)
         tk.Label(frm, text=text, fg=accent, bg=btn_bg,
-                 font=("Arial", 8)).pack(pady=(5, 0))
+                 font=("Arial", 8)).pack(pady=(4, 0))
         tk.Label(frm, text=str(value), fg=accent, bg=btn_bg,
-                 font=("Arial", size, "bold")).pack(pady=(0, 5))
+                 font=("Arial", size, "bold")).pack(pady=(0, 4))
 
-    # 过滤明细
-    filter_frame = tk.LabelFrame(win, text="过滤明细", fg=accent, bg=bg,
-                                  font=("Arial", 9, "bold"))
-    filter_frame.pack(fill="both", expand=True, padx=20, pady=5)
+    # 明细：过滤明细 / OP-ED 区间 两个标签页
+    nb = ttk.Notebook(win)
+    nb.pack(fill="both", expand=True, padx=20, pady=(2, 6))
 
-    tree = ttk.Treeview(filter_frame, columns=("type", "count"), show="headings", height=8)
+    tab_filter = tk.Frame(nb, bg=bg)
+    nb.add(tab_filter, text="过滤明细")
+    filter_frame = tk.Frame(tab_filter, bg=bg)
+    filter_frame.pack(fill="both", expand=True)
+
+    tree = ttk.Treeview(filter_frame, columns=("type", "count"), show="headings", height=7)
     tree.heading("type", text="过滤类型")
     tree.heading("count", text="数量")
-    tree.column("type", width=200, anchor="w")
-    tree.column("count", width=100, anchor="e")
+    tree.column("type", width=220, anchor="w")
+    tree.column("count", width=90, anchor="e")
 
     filtering = report.get("filtering", {})
     items = [
@@ -2173,27 +2581,25 @@ def _show_kazumi_report(counter, report):
     tree.pack(side="left", fill="both", expand=True)
     scroll.pack(side="right", fill="y")
 
-    # 按钮
-    btn_frame = tk.Frame(win, bg=bg)
-    btn_frame.pack(fill="x", padx=20, pady=10)
-
-    def save_report():
-        from tkinter import filedialog
-        import json as _json
-        path = filedialog.asksaveasfilename(
-            defaultextension=".json", filetypes=[("JSON", "*.json")],
-            title="保存检测报告")
-        if path:
-            # 把 bytes 类型字段转字符串（Path 对象）
-            clean = {k: (str(v) if hasattr(v, 'parts') else v)
-                       for k, v in report.items()}
-            with open(path, "w", encoding="utf-8") as f:
-                _json.dump(clean, f, indent=2, ensure_ascii=False)
-
-    tk.Button(btn_frame, text="保存报告 (JSON)", command=save_report,
-              bg=btn_bg, fg=accent).pack(side="left", padx=5)
-    tk.Button(btn_frame, text="关闭", command=win.destroy,
-              bg=btn_bg, fg=accent).pack(side="right", padx=5)
+    tab_oped = tk.Frame(nb, bg=bg)
+    nb.add(tab_oped, text=f"OP/ED 区间 ({oped_count})")
+    ivs = report.get("oped_interval_list") or []
+    txt = tk.Text(tab_oped, bg=btn_bg, fg=accent, font=("Consolas", 9),
+                  bd=0, highlightthickness=0, wrap="none")
+    sb2 = ttk.Scrollbar(tab_oped, orient="vertical", command=txt.yview)
+    txt.configure(yscrollcommand=sb2.set)
+    txt.pack(side="left", fill="both", expand=True)
+    sb2.pack(side="right", fill="y")
+    if ivs:
+        seg_dur = (dur_sec / max(report.get("segments", 1), 1)) or 1.0
+        for si, (a, b) in enumerate(ivs, 1):
+            ep = int(a // seg_dur) + 1 if seg_dur > 0 else 0
+            txt.insert("end", f"{si:2d}.  第{ep:2d}集附近  {a:8.1f}s ~ {b:8.1f}s   时长 {b-a:6.1f}s\n")
+    else:
+        txt.insert("end", "未检出可重复的 OP/ED 片段。\n\n"
+                          "如果片源确实每集有固定片头片尾，可用设置里的\n"
+                          "「每集扣头(s) / 每集扣尾(s)」直接指定。\n")
+    txt.configure(state="disabled")
 
 
 if __name__ == "__main__":

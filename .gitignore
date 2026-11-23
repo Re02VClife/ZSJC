@@ -16,6 +16,11 @@ venv/
 # 构建产物
 build/
 dist/
+build_lite/
+dist_lite/
+build_new/
+dist_new/
+dist_cuda/
 
 # 自编译 OpenCV CUDA DLL（200MB+，不随仓库分发）
 opencv_dlls/

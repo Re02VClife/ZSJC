@@ -25,6 +25,7 @@ a = Analysis(
     hiddenimports=[
         'opencv_env',
         'gpu_backend',
+        'kazumi_processor',
         'cv2',
         'PIL',
         'dxcam',

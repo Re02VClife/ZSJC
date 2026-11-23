@@ -19,6 +19,7 @@ a = Analysis(
         'opencv_env',
         'gpu_backend',
         'async_pipeline',
+        'kazumi_processor',
         'cv2',
         'PIL',
         'dxcam',

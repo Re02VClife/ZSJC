@@ -141,6 +141,20 @@ CONFIG = {
     "OPED_EXIT_CONSEC": 3,  # 连续不匹配帧数（退出）
     "OPED_MIN_DURATION": 30,  # 最小区间长度（秒），短于此刻丢弃
     "OPED_SELF_EXCLUDE_SEC": 90,  # 自排除窗口（秒），不与此时间内历史比较
+    "OPED_SEARCH_WINDOW_SEC": 1800,  # 往前找重复的最大跨度（秒）
+    "OPED_OFFSET_BUCKET_SEC": 3.0,     # 重复段的偏移分桶宽度（秒）
+    "OPED_CLUSTER_GAP_SEC": 15.0,       # 密集点聚成段时允许的最大间隙（秒）
+    "OPED_MATCH_MIN_DENSITY": 0.15,     # 段内匹配密度下限（每秒匹配样本数）
+    "OPED_MIN_MATCH_HITS": 8,          # 一段至少要有多少个匹配样本
+    "OPED_DENSITY_WINDOW_SEC": 15.0,   # 滑窗密度的半窗宽（秒）
+    "OPED_BRIGHT_TOL": 22.0,           # 匹配帧的平均亮度差上限（0-255），压暗场误配
+    "OPED_BATCH_SAMPLE_SEC": 0.5,     # 批处理采样间隔（秒）：越小越能容忍各集的相位差
+    # 片源每集 OP/ED 画面不同时（乱序番、不同版本 OP），重复检测天然失效；
+    # 这时可以按「每集固定扣头/扣尾」直接扣掉，0 = 不用。
+    "OPED_MANUAL_HEAD_SEC": 0.0,       # 每集开头固定扣除（秒）
+    "OPED_MANUAL_TAIL_SEC": 0.0,       # 每集结尾固定扣除（秒）
+    # 多集番剧的 OP/ED 每隔一集约 20~25 分钟复现一次，
+    # 因此必须能回溯到上一集（旧版写死 180 秒，永远检不到跨集 OP/ED）。
     # ========== 视频文件模式 ==========
     "VIDEO_MODE": False,                  # 当前是否为视频文件模式（运行时动态设置，不必持久化）
     "VIDEO_FILE_PATH": "",                # 上次打开的视频文件路径
@@ -156,6 +170,9 @@ CONFIG = {
 
     # ========== 番剧导入 ==========
     "KAZUMI_PARALLEL_WORKERS": 4,        # 番剧导入并行分段数（1=串行，>1=多线程分段处理）
+    "KAZUMI_PAUSE_CAPTURE": True,        # 离线检测时暂停实时截屏（避免两套检测抢 CPU）
+    "KAZUMI_SEARCH_PATHS": [],           # 「导入番剧」里保存的常用缓存目录
+    "KAZUMI_LAST_DIR": "",               # 上次使用的缓存目录
     # ========== 颜色方案 ==========
     "COLORS": {
         "accent": "#E6397C",
