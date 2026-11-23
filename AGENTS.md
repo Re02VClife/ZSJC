@@ -38,7 +38,9 @@ GUI 实时截屏统计，离线可批量提取。详细说明见 `README.md`，�
 
 ```bash
 python build.py                                                       # 合并单文件
-python -m PyInstaller main.spec --noconfirm                           # 完整版（含 CUDA，约 1.4GB）
+.venv\Scripts\python.exe -m PyInstaller main.spec --noconfirm        # 完整版（含 CUDA，约 1.4GB）
+                                                                    # 必须用 .venv 的 python：PATH 上的
+                                                                    # python 其 cv2 不带 CUDA
 .venv-lite\Scripts\python -m PyInstaller main_lite.spec --noconfirm   # 轻量版（CPU，约 150MB）
 ```
 
