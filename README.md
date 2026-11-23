@@ -212,10 +212,15 @@ python main.py
 - 左上角信息面板：实时张数、总张数、净平均张数（扣除 OP/ED）、当前状态。
 - 右侧两个波形图：短期与长期张数速率变化，已识别的 OP/ED 区间会高亮显示。
 - 点击设置，查看预览图和更详细的过滤信息、总张数历史及各类过滤数量。
-
+<p align="center">
+<img width="722" height="752" alt="44c74839-16b1-4c6d-9fe9-6d40cde728e6" src="https://github.com/user-attachments/assets/bac57af2-a7a2-48cf-932d-70fd0ec5fa70" />
+</p>
 ### 5. 保存运行记录
 点击设置中的「保存运行记录」按钮，输入名称即可保存当前运行数据，
 包含 OP/ED 扣除明细、各类过滤数量、瞬时帧率统计等。
+<p align="center">
+<img width="706" height="336" alt="fa1777a9-9e0c-4a6b-af3a-255c65ef0d9d" src="https://github.com/user-attachments/assets/5c73c471-f1a9-458f-ba94-d0f23f45d889" />
+</p>
 可在「运行记录管理」列表中查看、编辑或删除。
 
 ### 6. 暂停/继续
