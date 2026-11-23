@@ -181,7 +181,7 @@ ZSJC/
 ├── diagnose.py           # 逐阶段性能诊断（CLI）
 ├── build.py              # 多模块合并为单文件 ZhangShuJianCe.py
 ├── main.spec             # PyInstaller 完整版（含自编译 OpenCV CUDA 运行时）
-├── main_lite.spec        # PyInstaller 轻量版（CPU-only，约 58MB）
+├── main_lite.spec        # PyInstaller 轻量版（CPU-only，约 59MB）
 ├── tests/test_pipeline.py# 回归测试（GPU/CPU 一致性、端到端、视频帧源）
 ├── 日志.md               # 开发日志与实测数据
 ├── 项目分析报告.md       # 历史代码审查报告
